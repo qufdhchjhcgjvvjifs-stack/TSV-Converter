@@ -2274,8 +2274,6 @@ class MainWindow(QMainWindow):
         # Прогресс бар
         self.progress_bar = QProgressBar()
         self.progress_bar.setMinimumHeight(24)
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
         self.main_layout.addWidget(self.progress_bar)
 
         # Спойлер журнала событий
@@ -2379,8 +2377,7 @@ class MainWindow(QMainWindow):
         # Строка 1: Формат и директория
         layout.addWidget(QLabel("Формат:"), 0, 0)
         self.format_combo = QComboBox()
-        self.format_combo.addItems(["xlsx", "xlsb", "csv"])
-        self.format_combo.currentTextChanged.connect(self._on_format_changed)
+        self.format_combo.addItems(["xlsx", "csv"])
         layout.addWidget(self.format_combo, 0, 1)
 
         layout.addWidget(QLabel("Сохранить в:"), 0, 2)
@@ -2831,16 +2828,6 @@ class MainWindow(QMainWindow):
         # Здесь будет вызов диалога настрое�� сводной таблицы
         self.log_message("Настройки сводной таблицы", QColor("blue"))
 
-    def _on_format_changed(self, format_name: str):
-        """Обработчик изменения формата вывода."""
-        format_lower = format_name.lower()
-
-        if hasattr(self, "pivot_btn"):
-            self.pivot_btn.setEnabled(format_lower != "xlsb")
-
-        if format_lower == "xlsb":
-            self.log_message("Формат XLSB: сводные таблицы недоступны", QColor("blue"))
-
     def _show_settings(self):
         """Показать настройки приложения."""
         dialog = SettingsDialog(self)
@@ -2935,14 +2922,13 @@ class MainWindow(QMainWindow):
         """
         from converter import ProgressData
 
-        # Check if it has the expected attributes
-        if not hasattr(progress_data, "current_file"):
+        if not isinstance(progress_data, ProgressData):
             return
 
-        # Store current data
+        # Сохраняем текущие данные
         self._current_progress_data = progress_data
 
-        # Show progress panel
+        # Показываем панель прогресса
         if hasattr(self, "progress_details_widget"):
             self.progress_details_widget.setVisible(True)
             self.progress_file_label.setText(progress_data.current_file or "—")

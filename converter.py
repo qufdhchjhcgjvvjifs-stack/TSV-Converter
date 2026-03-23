@@ -15,14 +15,6 @@ from PySide6.QtGui import QColor
 
 import xlsxwriter
 
-try:
-    from pyxlsbwriter import XlsbWriter as XlsbWriterLib
-
-    XLSB_SUPPORT = True
-except ImportError:
-    XLSB_SUPPORT = False
-    XlsbWriterLib = None
-
 
 # ============================================================================
 # ТИПЫ ДАННЫХ ДЛЯ ПРОГРЕССА
@@ -33,7 +25,7 @@ except ImportError:
 class ProgressData:
     """
     Структура данных для расширенной информации о прогрессе.
-
+    
     Attributes:
         percent: Процент выполнения (0-100)
         processed_rows: Обработано строк
@@ -44,7 +36,6 @@ class ProgressData:
         current_file: Текущий обрабатываемый файл
         current_operation: Текущая операция (текст)
     """
-
     percent: int = 0
     processed_rows: int = 0
     total_rows: int = 0
@@ -53,32 +44,32 @@ class ProgressData:
     rows_per_second: float = 0.0
     current_file: str = ""
     current_operation: str = ""
-
+    
     def format_eta(self) -> str:
         """Форматирует ETA в читаемый вид (MM:SS или HH:MM:SS)."""
         if self.eta_seconds < 0:
             return "--:--"
-
+        
         total_seconds = int(self.eta_seconds)
         hours = total_seconds // 3600
         minutes = (total_seconds % 3600) // 60
         seconds = total_seconds % 60
-
+        
         if hours > 0:
             return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
         return f"{minutes:02d}:{seconds:02d}"
-
+    
     def format_elapsed(self) -> str:
         """Форматирует прошедшее время в читаемый вид."""
         total_seconds = int(self.elapsed_seconds)
         hours = total_seconds // 3600
         minutes = (total_seconds % 3600) // 60
         seconds = total_seconds % 60
-
+        
         if hours > 0:
             return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
         return f"{minutes:02d}:{seconds:02d}"
-
+    
     def format_speed(self) -> str:
         """Форматирует скорость обработки."""
         if self.rows_per_second < 1:
@@ -97,18 +88,18 @@ class ProgressData:
 class ProgressTracker:
     """
     Трекер прогресса с расчётом метрик производительности.
-
+    
     Вычисляет:
     - Процент выполнения
     - Оставшееся время (ETA)
     - Скорость обработки (строк/сек)
     - Прошедшее время
     """
-
+    
     def __init__(self, total_rows: int = 0):
         """
         Инициализация трекера.
-
+        
         Args:
             total_rows: Общее количество строк для обработки
         """
@@ -117,64 +108,60 @@ class ProgressTracker:
         self.start_time: Optional[float] = None
         self.last_update_time: float = 0
         self.min_update_interval: float = 0.1  # Минимальный интервал обновления (сек)
-
+    
     def start(self):
         """Запускает отсчёт времени."""
         self.start_time = time.time()
         self.last_update_time = self.start_time
-
+    
     def update(self, processed_rows: int) -> ProgressData:
         """
         Обновляет прогресс и возвращает метрики.
-
+        
         Args:
             processed_rows: Количество обработанных строк
-
+        
         Returns:
             ProgressData с актуальными метриками
         """
         current_time = time.time()
-
+        
         # Защита от слишком частых обновлений
         if current_time - self.last_update_time < self.min_update_interval:
             return None
-
+        
         self.processed_rows = processed_rows
         self.last_update_time = current_time
-
+        
         # Расчёт метрик
         elapsed = current_time - self.start_time if self.start_time else 0
-
+        
         # Скорость обработки
         speed = processed_rows / elapsed if elapsed > 0 else 0
-
+        
         # Процент выполнения
-        percent = (
-            int((processed_rows / max(self.total_rows, 1)) * 100)
-            if self.total_rows > 0
-            else 0
-        )
-
+        percent = int((processed_rows / max(self.total_rows, 1)) * 100) if self.total_rows > 0 else 0
+        
         # ETA (оставшееся время)
         if speed > 0 and self.total_rows > 0:
             remaining_rows = self.total_rows - processed_rows
             eta = remaining_rows / speed
         else:
             eta = 0
-
+        
         return ProgressData(
             percent=min(percent, 100),
             processed_rows=processed_rows,
             total_rows=self.total_rows,
             elapsed_seconds=elapsed,
             eta_seconds=eta,
-            rows_per_second=speed,
+            rows_per_second=speed
         )
-
+    
     def reset(self, new_total: int = 0):
         """
         Сбрасывает трекер для новой задачи.
-
+        
         Args:
             new_total: Новое общее количество строк (0 = не менять)
         """
@@ -472,7 +459,7 @@ class TSVToExcelConverter(QThread):
                 # Обновляем информацию о текущем файле
                 progress_data = ProgressData(
                     current_file=os.path.basename(tsv_file),
-                    current_operation="Чтение файла...",
+                    current_operation="Чтение файла..."
                 )
                 self.progress_data.emit(progress_data)
 
@@ -520,7 +507,7 @@ class TSVToExcelConverter(QThread):
 
                     # Считаем строки (оптимизированные циклы)
                     if filter_idx is not None and self.filter_values:
-                        filter_vals = self.filter_values  # Локальная ссылка быстрее
+                        filter_vals = self.filter_values # Локальная ссылка быстрее
                         for i, row in enumerate(reader):
                             if i % 2000 == 0 and self.stop_flag:
                                 return
@@ -574,9 +561,7 @@ class TSVToExcelConverter(QThread):
             if self.output_format.lower() == "csv":
                 return self._convert_to_csv(input_file, encoding, delimiter, start_time)
             else:
-                return self._convert_to_xlsx(
-                    input_file, encoding, delimiter, start_time
-                )
+                return self._convert_to_xlsx(input_file, encoding, delimiter, start_time)
 
         except PermissionError:
             self.log_message.emit(
@@ -591,15 +576,13 @@ class TSVToExcelConverter(QThread):
             )
             return False
 
-    def _convert_to_csv(
-        self, input_file: str, encoding: str, delimiter: str, start_time: float
-    ) -> bool:
+    def _convert_to_csv(self, input_file: str, encoding: str, delimiter: str, start_time: float) -> bool:
         """Конвертация в CSV."""
         base_name = os.path.splitext(os.path.basename(input_file))[0]
-
+        
         with open(input_file, "r", encoding=encoding, errors="replace") as f:
             reader = csv.reader(f, delimiter=delimiter)
-
+            
             try:
                 headers = next(reader)
             except StopIteration:
@@ -646,7 +629,7 @@ class TSVToExcelConverter(QThread):
         with open(output_path, "w", encoding="utf-8-sig", newline="") as out_f:
             writer = csv.writer(out_f, delimiter=";")
             writer.writerow(headers)
-
+            
             if filter_idx is not None and self.filter_values:
                 filter_vals = self.filter_values
                 for i, row in enumerate(reader):
@@ -660,7 +643,7 @@ class TSVToExcelConverter(QThread):
                     if i % 2000 == 0 and self.stop_flag:
                         break
                     writer.writerow(row)
-
+                    
         self.output_file_path = output_path
 
     def _write_split_csv(self, reader, headers, base_name, split_idx, filter_idx):
@@ -668,11 +651,11 @@ class TSVToExcelConverter(QThread):
         # Чтобы не держать тысячи файлов, будем собирать в словаре списков (осторожно с памятью!)
         # Или, лучше, проход в один поток, но открытие/закрытие (медленно).
         # Оптимально: словарь открытых хэндлов (до лимита ОС).
-
+        
         open_files = {}
         writers = {}
-        selected_vals = self.selected_values  # Локальная ссылка
-
+        selected_vals = self.selected_values # Локальная ссылка
+        
         try:
             # Разделяем циклы для оптимизации
             if filter_idx is not None and self.filter_values:
@@ -680,61 +663,41 @@ class TSVToExcelConverter(QThread):
                 for i, row in enumerate(reader):
                     if i % 2000 == 0 and self.stop_flag:
                         break
-
+                    
                     if filter_idx < len(row) and row[filter_idx] not in filter_vals:
                         continue
-
-                    self._process_split_row(
-                        row,
-                        split_idx,
-                        selected_vals,
-                        headers,
-                        base_name,
-                        open_files,
-                        writers,
-                    )
+                    
+                    self._process_split_row(row, split_idx, selected_vals, headers, base_name, open_files, writers)
             else:
                 for i, row in enumerate(reader):
                     if i % 2000 == 0 and self.stop_flag:
                         break
-
-                    self._process_split_row(
-                        row,
-                        split_idx,
-                        selected_vals,
-                        headers,
-                        base_name,
-                        open_files,
-                        writers,
-                    )
-
+                    
+                    self._process_split_row(row, split_idx, selected_vals, headers, base_name, open_files, writers)
+                
         finally:
             for f in open_files.values():
                 f.close()
-
+        
         # Указываем путь к папке как результат
         self.output_file_path = self.output_directory
 
-    def _process_split_row(
-        self, row, split_idx, selected_vals, headers, base_name, open_files, writers
-    ):
+    def _process_split_row(self, row, split_idx, selected_vals, headers, base_name, open_files, writers):
         """Вспомогательный метод для записи строки в нужный файл."""
         key = row[split_idx] if split_idx < len(row) else "Unknown"
         if selected_vals and key not in selected_vals:
             key = "Остальные"
-
+        
         # Санитизация имени файла (только если новый ключ)
         if key not in writers:
             safe_key = FileUtilities.sanitize_sheet_name(key)
-            file_path = os.path.join(
-                self.output_directory, f"{base_name}_{safe_key}.csv"
-            )
+            file_path = os.path.join(self.output_directory, f"{base_name}_{safe_key}.csv")
             f = open(file_path, "w", encoding="utf-8-sig", newline="")
             writer = csv.writer(f, delimiter=";")
             writer.writerow(headers)
             open_files[key] = f
             writers[key] = writer
-
+            
         writers[key].writerow(row)
 
     def _create_csv_pivot(self, input_file, base_name):
@@ -746,43 +709,31 @@ class TSVToExcelConverter(QThread):
                 self.filter_column if self.filter_column != "Не фильтровать" else "",
                 self.filter_values or [],
             )
-
+            
             if pivot_data:
-                output_path = os.path.join(
-                    self.output_directory, f"{base_name}_Pivot.csv"
-                )
+                output_path = os.path.join(self.output_directory, f"{base_name}_Pivot.csv")
                 with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
                     writer = csv.writer(f, delimiter=";")
-
+                    
                     # Заголовки
                     row_headers = self.pivot_settings.get("rows", [])
                     # col_headers - removed as unused
                     writer.writerow(row_headers + ["Колонка", "Метрика", "Значение"])
-
+                    
                     for row_key, col_dict in pivot_data.items():
-                        row_prefix = (
-                            list(row_key) if isinstance(row_key, tuple) else [row_key]
-                        )
+                        row_prefix = list(row_key) if isinstance(row_key, tuple) else [row_key]
                         for col_key, val_dict in col_dict.items():
-                            col_prefix = (
-                                list(col_key)
-                                if isinstance(col_key, tuple)
-                                else [col_key]
-                            )
+                            col_prefix = list(col_key) if isinstance(col_key, tuple) else [col_key]
                             col_str = " / ".join(map(str, col_prefix))
-
+                            
                             for metric, value in val_dict.items():
                                 writer.writerow(row_prefix + [col_str, metric, value])
-
-                self.log_message.emit(
-                    "Сводная таблица сохранена в отдельный CSV", QColor("green")
-                )
+                                
+                self.log_message.emit("Сводная таблица сохранена в отдельный CSV", QColor("green"))
         except Exception as e:
             self.log_message.emit(f"Ошибка CSV сводной: {e}", QColor("red"))
 
-    def _convert_to_xlsx(
-        self, input_file: str, encoding: str, delimiter: str, start_time: float
-    ) -> bool:
+    def _convert_to_xlsx(self, input_file: str, encoding: str, delimiter: str, start_time: float) -> bool:
         """Стандартная конвертация в XLSX (перенесенная логика)."""
         # Имя выходного файла
         base_name = os.path.splitext(os.path.basename(input_file))[0]
@@ -827,17 +778,10 @@ class TSVToExcelConverter(QThread):
             # Конвертация
             if split_idx is not None:
                 self._convert_with_split(
-                    workbook,
-                    reader,
-                    headers,
-                    split_idx,
-                    filter_idx,
-                    os.path.basename(input_file),
+                    workbook, reader, headers, split_idx, filter_idx, os.path.basename(input_file)
                 )
             else:
-                self._convert_without_split(
-                    workbook, reader, headers, filter_idx, os.path.basename(input_file)
-                )
+                self._convert_without_split(workbook, reader, headers, filter_idx, os.path.basename(input_file))
 
         # Обработка сводной таблицы (ДО закрытия книги!)
         if self.pivot_settings:
@@ -877,7 +821,9 @@ class TSVToExcelConverter(QThread):
                         workbook, pivot_data, self.pivot_settings, cached_formats
                     )
 
-                    self.log_message.emit("Сводная таблица создана", QColor("green"))
+                    self.log_message.emit(
+                        "Сводная таблица создана", QColor("green")
+                    )
                 else:
                     self.log_message.emit(
                         "Нет данных для сводной таблицы", QColor("orange")
@@ -1030,17 +976,15 @@ class TSVToExcelConverter(QThread):
                 if row_num % update_freq == 0:
                     if self.stop_flag:
                         break
-
+                    
                     # Обновляем трекер и отправляем данные
                     progress_data = self.progress_tracker.update(row_num)
                     if progress_data:
                         progress_data.current_file = current_file
                         progress_data.current_operation = "Запись данных..."
                         self.progress_data.emit(progress_data)
-
-                    self.update_progress.emit(
-                        progress_data.percent if progress_data else 0
-                    )
+                    
+                    self.update_progress.emit(progress_data.percent if progress_data else 0)
 
                 if filter_idx < len(row) and row[filter_idx] not in filter_vals:
                     continue
@@ -1051,17 +995,15 @@ class TSVToExcelConverter(QThread):
                 if row_num % update_freq == 0:
                     if self.stop_flag:
                         break
-
+                    
                     # Обновляем трекер и отправляем данные
                     progress_data = self.progress_tracker.update(row_num)
                     if progress_data:
                         progress_data.current_file = current_file
                         progress_data.current_operation = "Запись данных..."
                         self.progress_data.emit(progress_data)
-
-                    self.update_progress.emit(
-                        progress_data.percent if progress_data else 0
-                    )
+                    
+                    self.update_progress.emit(progress_data.percent if progress_data else 0)
 
                 process_row(row)
 
@@ -1103,7 +1045,7 @@ class TSVToExcelConverter(QThread):
             worksheet.write_row(row_count, 0, row, self._cached_formats["cell"])
             # row_count += 1 # В Python nonlocal int immutable, нужно быть аккуратным, но += работает если переменная уже объявлена.
             # Но стоп! nonlocal row_count += 1 сработает корректно.
-
+            
         # Основной цикл с обновлением прогресса
         if filter_idx is not None and self.filter_values:
             filter_vals = self.filter_values
@@ -1112,17 +1054,15 @@ class TSVToExcelConverter(QThread):
                 if row_num % update_freq == 0:
                     if self.stop_flag:
                         break
-
+                    
                     # Обновляем трекер и отправляем данные
                     progress_data = self.progress_tracker.update(row_num)
                     if progress_data:
                         progress_data.current_file = current_file
                         progress_data.current_operation = "Запись данных..."
                         self.progress_data.emit(progress_data)
-
-                    self.update_progress.emit(
-                        progress_data.percent if progress_data else 0
-                    )
+                    
+                    self.update_progress.emit(progress_data.percent if progress_data else 0)
 
                 if filter_idx < len(row) and row[filter_idx] not in filter_vals:
                     continue
@@ -1148,17 +1088,15 @@ class TSVToExcelConverter(QThread):
                 if row_num % update_freq == 0:
                     if self.stop_flag:
                         break
-
+                    
                     # Обновляем трекер и отправляем данные
                     progress_data = self.progress_tracker.update(row_num)
                     if progress_data:
                         progress_data.current_file = current_file
                         progress_data.current_operation = "Запись данных..."
                         self.progress_data.emit(progress_data)
-
-                    self.update_progress.emit(
-                        progress_data.percent if progress_data else 0
-                    )
+                    
+                    self.update_progress.emit(progress_data.percent if progress_data else 0)
 
                 if worksheet is None or row_count >= MAX_ROWS:
                     sheet_name = FileUtilities.sanitize_sheet_name(
@@ -1227,7 +1165,7 @@ class PivotTableProcessor:
 
             with open(file_path, "r", encoding=encoding, errors="replace") as f:
                 reader = csv.reader(f, delimiter=delimiter)
-
+                
                 try:
                     headers = next(reader)
                 except StopIteration:
@@ -1238,9 +1176,7 @@ class PivotTableProcessor:
 
                 # Индексы
                 try:
-                    row_indices = [
-                        headers.index(row) for row in settings.get("rows", [])
-                    ]
+                    row_indices = [headers.index(row) for row in settings.get("rows", [])]
                     col_indices = [
                         headers.index(col) for col in settings.get("columns", [])
                     ]
@@ -1262,7 +1198,7 @@ class PivotTableProcessor:
                 # Подготовка к удалению дубликатов
                 remove_duplicates = settings.get("remove_duplicates", False)
                 seen_combinations = set()
-
+                
                 # Индексы для проверки уникальности (строки + столбцы + значения)
                 dedup_indices = []
                 if remove_duplicates:
@@ -1289,9 +1225,7 @@ class PivotTableProcessor:
 
                     # Удаление дубликатов (на лету)
                     if remove_duplicates:
-                        combination = tuple(
-                            row[idx] for idx in dedup_indices if idx < len(row)
-                        )
+                        combination = tuple(row[idx] for idx in dedup_indices if idx < len(row))
                         if combination in seen_combinations:
                             duplicates_removed += 1
                             continue
@@ -1339,9 +1273,7 @@ class PivotTableProcessor:
 
             # print(f"[Pivot] Обработано записей: {processed_count}")
             if remove_duplicates:
-                self.log_callback(
-                    f"Удалено дубликатов: {duplicates_removed}", QColor("blue")
-                )
+                self.log_callback(f"Удалено дубликатов: {duplicates_removed}", QColor("blue"))
             # print(f"[Pivot] Размер pivot_data: {len(pivot_data)}")
 
             # Агрегируем
@@ -1379,6 +1311,7 @@ class PivotTableProcessor:
 
     # Метод _remove_duplicates больше не нужен, его логика встроена в основной цикл
     # Можно удалить или оставить как заглушку, но лучше удалить.
+
 
     def write_pivot_table(
         self,
@@ -1483,86 +1416,3 @@ class PivotTableProcessor:
             worksheet.set_column(col_idx, col_idx, 15)
 
         self.log_callback("Сводная таблица создана", QColor("green"))
-
-
-# ============================================================================
-# ФАБРИКА КОНВЕРТЕРОВ
-# ============================================================================
-
-
-class ConverterFactory:
-    """Фабрика для создания конвертеров."""
-
-    @staticmethod
-    def supports_format(output_format: str) -> bool:
-        """Проверяет поддерживаемые форматы."""
-        return output_format.lower() in ("xlsx", "xlsb", "csv")
-
-    @staticmethod
-    def is_xlsb_format(output_format: str) -> bool:
-        """Проверяет, является ли формат XLSB."""
-        return output_format.lower() == "xlsb"
-
-    @staticmethod
-    def supports_pivot(output_format: str) -> bool:
-        """Проверяет поддержку сводных таблиц."""
-        return output_format.lower() != "xlsb"
-
-    @staticmethod
-    def is_xlsb_available() -> bool:
-        """Проверяет доступность формата XLSB."""
-        return XLSB_SUPPORT
-
-    @staticmethod
-    def create_converter(
-        output_format: str,
-        input_files: List[str],
-        output_directory: str,
-        auto_open: bool = False,
-        auto_delete: bool = False,
-        styles: Optional[Dict[str, Any]] = None,
-        header_color: str = "#C8DCF0",
-        split_column: str = "",
-        selected_values: Optional[List[str]] = None,
-        filter_column: str = "",
-        filter_values: Optional[List[str]] = None,
-        pivot_settings: Optional[Dict[str, Any]] = None,
-        total_rows: int = 0,
-    ):
-        """Создаёт соответствующий конвертер."""
-        if output_format.lower() == "xlsb":
-            if not XLSB_SUPPORT:
-                raise ImportError(
-                    "Формат XLSB недоступен. Установите: pip install pyxlsbwriter"
-                )
-            from xlsb_converter import XLSBConverter
-
-            return XLSBConverter(
-                input_files=input_files,
-                output_directory=output_directory,
-                output_format=output_format,
-                auto_open=auto_open,
-                auto_delete=auto_delete,
-                styles=styles,
-                header_color=header_color,
-                filter_column=filter_column,
-                filter_values=filter_values,
-                total_rows=total_rows,
-                split_column=split_column,
-                selected_values=selected_values,
-            )
-        else:
-            return TSVToExcelConverter(
-                input_files=input_files,
-                output_directory=output_directory,
-                output_format=output_format,
-                auto_open=auto_open,
-                auto_delete=auto_delete,
-                styles=styles,
-                header_color=header_color,
-                split_column=split_column,
-                selected_values=selected_values,
-                filter_column=filter_column,
-                filter_values=filter_values,
-                pivot_settings=pivot_settings,
-            )

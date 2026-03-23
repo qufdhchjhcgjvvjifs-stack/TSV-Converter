@@ -19,12 +19,7 @@ from gui import (
     TSVPreviewDialog,
     apply_theme_to_messagebox,
 )
-from converter import (
-    TSVToExcelConverter,
-    FileUtilities,
-    PivotTableProcessor,
-    ConverterFactory,
-)
+from converter import TSVToExcelConverter, FileUtilities, PivotTableProcessor
 
 
 class TSVConverterApp:
@@ -316,42 +311,11 @@ class TSVConverterApp:
             else []
         )
 
-        # Проверка формата XLSB
-        if ConverterFactory.is_xlsb_format(output_format):
-            if not ConverterFactory.is_xlsb_available():
-                msgbox = self._show_message_box(
-                    QMessageBox.Icon.Warning,
-                    "Формат недоступен",
-                    "Для использования формата XLSB установите библиотеку:\npip install pyxlsbwriter",
-                )
-                msgbox.exec()
-                self.window.start_btn.setEnabled(True)
-                self.window.stop_btn.setEnabled(False)
-                return
-
-            # Сброс настроек сводной таблицы для XLSB
-            if self.window._pivot_settings:
-                self.window._pivot_settings = None
-                self._log_message(
-                    "Сводные таблицы недоступны для формата XLSB", QColor("orange")
-                )
-
-        # Получаем total_rows из лейбла
-        total_rows_text = self.window.total_rows_label.text()
-        total_rows = 0
-        try:
-            # Удаляем "Строка:", запятые и пробелы
-            total_rows = int(
-                total_rows_text.replace("Строк: ", "").replace(",", "").replace(" ", "")
-            )
-        except ValueError:
-            pass
-
-        # Создаём конвертер через фабрику
-        self.converter = ConverterFactory.create_converter(
-            output_format=output_format,
+        # Создаём конвертер
+        self.converter = TSVToExcelConverter(
             input_files=files,
             output_directory=output_dir,
+            output_format=output_format,
             auto_open=self.window._settings.get("auto_open", False),
             auto_delete=self.window._settings.get("auto_delete", False),
             styles=styles,
@@ -361,33 +325,23 @@ class TSVConverterApp:
             filter_column=filter_column,
             filter_values=filter_values,
             pivot_settings=self.window._pivot_settings,
-            total_rows=total_rows,
         )
 
         # Подключаем сигналы
-        self.converter.update_progress.connect(self._on_update_progress)
+        self.converter.update_progress.connect(self.window.progress_bar.setValue)
         self.converter.progress_data.connect(self.window.update_progress_details)
         self.converter.log_message.connect(self._log_message)
         self.converter.finished_signal.connect(self._on_conversion_finished)
         self.converter.error.connect(self._on_conversion_error)
 
-        # Запускаем конвертер
+        # Запускаем
         self.converter.start()
 
-        # Запускаем таймер для обновления времени
+        # Таймер
         self._start_time = datetime.now()
         self._timer.start(1000)
 
         self._log_message("Конвертация запущена...", QColor("blue"))
-
-    def _on_update_progress(self, value):
-        """Обновляет прогресс-бар."""
-        self.window.progress_bar.setValue(value)
-
-        # Принудительно обрабатываем события GUI
-        from PySide6.QtWidgets import QApplication
-
-        QApplication.processEvents()
 
     def _stop_conversion(self):
         """Останавливает конвертацию."""
