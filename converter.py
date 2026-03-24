@@ -114,7 +114,7 @@ class ProgressTracker:
         self.start_time = time.time()
         self.last_update_time = self.start_time
     
-    def update(self, processed_rows: int) -> ProgressData:
+    def update(self, processed_rows: int, force: bool = False) -> ProgressData:
         """
         Обновляет прогресс и возвращает метрики.
         
@@ -127,7 +127,7 @@ class ProgressTracker:
         current_time = time.time()
         
         # Защита от слишком частых обновлений
-        if current_time - self.last_update_time < self.min_update_interval:
+        if not force and current_time - self.last_update_time < self.min_update_interval:
             return None
         
         self.processed_rows = processed_rows
@@ -326,6 +326,36 @@ class FileUtilities:
         return name
 
     @staticmethod
+    def sanitize_file_stem(name: str, used_names: Optional[Set[str]] = None) -> str:
+        """Очищает часть имени файла и гарантирует уникальность."""
+        if used_names is None:
+            used_names = set()
+
+        invalid_chars = '<>:"/\\|?*'
+        cleaned_name = "".join(
+            "_" if char in invalid_chars or ord(char) < 32 else char for char in name
+        )
+        cleaned_name = " ".join(cleaned_name.split())
+        cleaned_name = cleaned_name.strip().rstrip(". ")
+        cleaned_name = cleaned_name[:80].rstrip(". ")
+
+        if not cleaned_name:
+            cleaned_name = "Unknown"
+
+        base_name = cleaned_name
+        counter = 1
+        used_names_lower = {item.lower() for item in used_names}
+
+        while cleaned_name.lower() in used_names_lower:
+            suffix = f"_{counter}"
+            trimmed_base = base_name[: 80 - len(suffix)].rstrip(". ")
+            cleaned_name = f"{trimmed_base}{suffix}" if trimmed_base else f"File{suffix}"
+            counter += 1
+
+        used_names.add(cleaned_name)
+        return cleaned_name
+
+    @staticmethod
     def count_rows(
         file_path: str,
         delimiter: str,
@@ -433,6 +463,7 @@ class TSVToExcelConverter(QThread):
         """Основной метод потока."""
         try:
             self.log_message.emit("Начало конвертации...", QColor("blue"))
+            self.processed_rows = 0
 
             # Валидация
             if not self.input_files:
@@ -496,6 +527,19 @@ class TSVToExcelConverter(QThread):
             QColor("orange"),
         )
         self.stopped_signal.emit()
+
+    def _emit_progress_update(
+        self, current_file: str, current_operation: str, force: bool = False
+    ):
+        """Отправляет обновление детального прогресса конвертации."""
+        progress_data = self.progress_tracker.update(self.processed_rows, force=force)
+        if not progress_data:
+            return
+
+        progress_data.current_file = current_file
+        progress_data.current_operation = current_operation
+        self.progress_data.emit(progress_data)
+        self.update_progress.emit(progress_data.percent)
 
     def _count_total_rows(self):
         """Подсчитывает общее количество строк для прогресс-бара."""
@@ -646,6 +690,9 @@ class TSVToExcelConverter(QThread):
 
     def _write_single_csv(self, reader, headers, base_name, filter_idx):
         output_path = os.path.join(self.output_directory, f"{base_name}.csv")
+        current_file = os.path.basename(output_path)
+        update_freq = max(1, self.total_rows // 100)
+
         with open(output_path, "w", encoding="utf-8-sig", newline="") as out_f:
             writer = csv.writer(out_f, delimiter=";")
             writer.writerow(headers)
@@ -658,11 +705,19 @@ class TSVToExcelConverter(QThread):
                     if filter_idx < len(row) and row[filter_idx] not in filter_vals:
                         continue
                     writer.writerow(row)
+                    self.processed_rows += 1
+                    if self.processed_rows % update_freq == 0:
+                        self._emit_progress_update(current_file, "Запись CSV...")
             else:
                 for i, row in enumerate(reader):
                     if i % 2000 == 0 and self.stop_flag:
                         break
                     writer.writerow(row)
+                    self.processed_rows += 1
+                    if self.processed_rows % update_freq == 0:
+                        self._emit_progress_update(current_file, "Запись CSV...")
+
+        self._emit_progress_update(current_file, "Запись CSV...", force=True)
                     
         self.output_file_path = output_path
 
@@ -674,7 +729,10 @@ class TSVToExcelConverter(QThread):
         
         open_files = {}
         writers = {}
+        used_file_names: Set[str] = set()
         selected_vals = self.selected_values # Локальная ссылка
+        current_file = f"{base_name}_*.csv"
+        update_freq = max(1, self.total_rows // 100)
         
         try:
             # Разделяем циклы для оптимизации
@@ -687,22 +745,62 @@ class TSVToExcelConverter(QThread):
                     if filter_idx < len(row) and row[filter_idx] not in filter_vals:
                         continue
                     
-                    self._process_split_row(row, split_idx, selected_vals, headers, base_name, open_files, writers)
+                    self._process_split_row(
+                        row,
+                        split_idx,
+                        selected_vals,
+                        headers,
+                        base_name,
+                        open_files,
+                        writers,
+                        used_file_names,
+                    )
+                    self.processed_rows += 1
+                    if self.processed_rows % update_freq == 0:
+                        self._emit_progress_update(
+                            current_file, "Распределение по CSV..."
+                        )
             else:
                 for i, row in enumerate(reader):
                     if i % 2000 == 0 and self.stop_flag:
                         break
                     
-                    self._process_split_row(row, split_idx, selected_vals, headers, base_name, open_files, writers)
+                    self._process_split_row(
+                        row,
+                        split_idx,
+                        selected_vals,
+                        headers,
+                        base_name,
+                        open_files,
+                        writers,
+                        used_file_names,
+                    )
+                    self.processed_rows += 1
+                    if self.processed_rows % update_freq == 0:
+                        self._emit_progress_update(
+                            current_file, "Распределение по CSV..."
+                        )
                 
         finally:
             for f in open_files.values():
                 f.close()
+
+        self._emit_progress_update(current_file, "Распределение по CSV...", force=True)
         
         # Указываем путь к папке как результат
         self.output_file_path = self.output_directory
 
-    def _process_split_row(self, row, split_idx, selected_vals, headers, base_name, open_files, writers):
+    def _process_split_row(
+        self,
+        row,
+        split_idx,
+        selected_vals,
+        headers,
+        base_name,
+        open_files,
+        writers,
+        used_file_names,
+    ):
         """Вспомогательный метод для записи строки в нужный файл."""
         key = row[split_idx] if split_idx < len(row) else "Unknown"
         if selected_vals and key not in selected_vals:
@@ -710,7 +808,7 @@ class TSVToExcelConverter(QThread):
         
         # Санитизация имени файла (только если новый ключ)
         if key not in writers:
-            safe_key = FileUtilities.sanitize_sheet_name(key)
+            safe_key = FileUtilities.sanitize_file_stem(key, used_file_names)
             file_path = os.path.join(self.output_directory, f"{base_name}_{safe_key}.csv")
             f = open(file_path, "w", encoding="utf-8-sig", newline="")
             writer = csv.writer(f, delimiter=";")
@@ -997,40 +1095,28 @@ class TSVToExcelConverter(QThread):
         if filter_idx is not None and self.filter_values:
             filter_vals = self.filter_values
             for row_num, row in enumerate(reader, 1):
-                # Прогресс и проверка стоп-флага (совмещено)
-                if row_num % update_freq == 0:
-                    if self.stop_flag:
-                        break
-                    
-                    # Обновляем трекер и отправляем данные
-                    progress_data = self.progress_tracker.update(row_num)
-                    if progress_data:
-                        progress_data.current_file = current_file
-                        progress_data.current_operation = "Запись данных..."
-                        self.progress_data.emit(progress_data)
-                    
-                    self.update_progress.emit(progress_data.percent if progress_data else 0)
+                if row_num % 2000 == 0 and self.stop_flag:
+                    break
 
                 if filter_idx < len(row) and row[filter_idx] not in filter_vals:
                     continue
 
                 process_row(row)
+                self.processed_rows += 1
+                if self.processed_rows % update_freq == 0:
+                    self._emit_progress_update(current_file, "Запись данных...")
         else:
             for row_num, row in enumerate(reader, 1):
-                if row_num % update_freq == 0:
-                    if self.stop_flag:
-                        break
-                    
-                    # Обновляем трекер и отправляем данные
-                    progress_data = self.progress_tracker.update(row_num)
-                    if progress_data:
-                        progress_data.current_file = current_file
-                        progress_data.current_operation = "Запись данных..."
-                        self.progress_data.emit(progress_data)
-                    
-                    self.update_progress.emit(progress_data.percent if progress_data else 0)
+                if row_num % 2000 == 0 and self.stop_flag:
+                    break
 
                 process_row(row)
+
+                self.processed_rows += 1
+                if self.processed_rows % update_freq == 0:
+                    self._emit_progress_update(current_file, "Запись данных...")
+
+        self._emit_progress_update(current_file, "Запись данных...", force=True)
 
     def _convert_without_split(
         self,
@@ -1075,19 +1161,8 @@ class TSVToExcelConverter(QThread):
         if filter_idx is not None and self.filter_values:
             filter_vals = self.filter_values
             for row_num, row in enumerate(reader, 1):
-                # Проверка частоты обновлений
-                if row_num % update_freq == 0:
-                    if self.stop_flag:
-                        break
-                    
-                    # Обновляем трекер и отправляем данные
-                    progress_data = self.progress_tracker.update(row_num)
-                    if progress_data:
-                        progress_data.current_file = current_file
-                        progress_data.current_operation = "Запись данных..."
-                        self.progress_data.emit(progress_data)
-                    
-                    self.update_progress.emit(progress_data.percent if progress_data else 0)
+                if row_num % 2000 == 0 and self.stop_flag:
+                    break
 
                 if filter_idx < len(row) and row[filter_idx] not in filter_vals:
                     continue
@@ -1108,20 +1183,13 @@ class TSVToExcelConverter(QThread):
 
                 worksheet.write_row(row_count, 0, row, self._cached_formats["cell"])
                 row_count += 1
+                self.processed_rows += 1
+                if self.processed_rows % update_freq == 0:
+                    self._emit_progress_update(current_file, "Запись данных...")
         else:
             for row_num, row in enumerate(reader, 1):
-                if row_num % update_freq == 0:
-                    if self.stop_flag:
-                        break
-                    
-                    # Обновляем трекер и отправляем данные
-                    progress_data = self.progress_tracker.update(row_num)
-                    if progress_data:
-                        progress_data.current_file = current_file
-                        progress_data.current_operation = "Запись данных..."
-                        self.progress_data.emit(progress_data)
-                    
-                    self.update_progress.emit(progress_data.percent if progress_data else 0)
+                if row_num % 2000 == 0 and self.stop_flag:
+                    break
 
                 if worksheet is None or row_count >= MAX_ROWS:
                     sheet_name = FileUtilities.sanitize_sheet_name(
@@ -1138,6 +1206,11 @@ class TSVToExcelConverter(QThread):
 
                 worksheet.write_row(row_count, 0, row, self._cached_formats["cell"])
                 row_count += 1
+                self.processed_rows += 1
+                if self.processed_rows % update_freq == 0:
+                    self._emit_progress_update(current_file, "Запись данных...")
+
+        self._emit_progress_update(current_file, "Запись данных...", force=True)
 
     def stop(self):
         """Останавливает конвертацию."""
