@@ -379,6 +379,25 @@ class TSVConverterApp:
         )
         msgbox.exec()
 
+        if self.converter and self.converter.output_file_path:
+            if self.converter.auto_open and os.path.exists(self.converter.output_file_path):
+                QDesktopServices.openUrl(QUrl.fromLocalFile(self.converter.output_file_path))
+
+            if self.converter.auto_delete and self.converter.input_files:
+                for src_file in self.converter.input_files:
+                    if os.path.exists(src_file):
+                        try:
+                            os.remove(src_file)
+                            self._log_message(
+                                f"Удалён исходный файл: {os.path.basename(src_file)}",
+                                QColor("orange"),
+                            )
+                        except Exception as e:
+                            self._log_message(
+                                f"Не удалось удалить {os.path.basename(src_file)}: {e}",
+                                QColor("red"),
+                            )
+
     def _on_conversion_stopped(self):
         """Обработчик пользовательской остановки конвертации."""
         self._timer.stop()
