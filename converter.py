@@ -891,125 +891,157 @@ class TSVToExcelConverter(QThread):
         base_name = os.path.splitext(os.path.basename(input_file))[0]
         output_path = os.path.join(self.output_directory, f"{base_name}.xlsx")
 
-        # Создаём книгу Excel
-        workbook = xlsxwriter.Workbook(
-            output_path,
-            {"constant_memory": True, "use_zip64": True, "in_memory": False},
-        )
+        workbook = None
+        result = "error"
+        try:
+            # Создаём книгу Excel
+            workbook = xlsxwriter.Workbook(
+                output_path,
+                {"constant_memory": True, "use_zip64": True, "in_memory": False},
+            )
 
-        # Инициализируем форматы
-        self._init_formats(workbook)
+            # Инициализируем форматы
+            self._init_formats(workbook)
 
-        # Открываем исходный файл
-        with open(input_file, "r", encoding=encoding, errors="replace") as f:
-            reader = csv.reader(f, delimiter=delimiter)
+            # Открываем исходный файл
+            with open(input_file, "r", encoding=encoding, errors="replace") as f:
+                reader = csv.reader(f, delimiter=delimiter)
 
-            try:
-                headers = next(reader)
-            except StopIteration:
-                self.log_message.emit("Пустой файл", QColor("red"))
-                workbook.close()
-                return "error"
-
-            # Индексы
-            split_idx = None
-            filter_idx = None
-
-            if self.split_column and self.split_column != "Не разделять":
                 try:
-                    split_idx = headers.index(self.split_column)
-                except ValueError:
-                    split_idx = None
+                    headers = next(reader)
+                except StopIteration:
+                    self.log_message.emit("Пустой файл", QColor("red"))
+                    return "error"
 
-            if self.filter_column and self.filter_column != "Не фильтровать":
-                try:
-                    filter_idx = headers.index(self.filter_column)
-                except ValueError:
-                    filter_idx = None
+                # Индексы
+                split_idx = None
+                filter_idx = None
 
-            # Конвертация
-            if split_idx is not None:
-                self._convert_with_split(
-                    workbook,
-                    reader,
-                    headers,
-                    split_idx,
-                    filter_idx,
-                    os.path.basename(input_file),
-                )
-            else:
-                self._convert_without_split(
-                    workbook, reader, headers, filter_idx, os.path.basename(input_file)
-                )
+                if self.split_column and self.split_column != "Не разделять":
+                    try:
+                        split_idx = headers.index(self.split_column)
+                    except ValueError:
+                        split_idx = None
 
-        if self.stop_flag:
-            workbook.close()
-            self.output_file_path = None
-            return "stopped"
+                if self.filter_column and self.filter_column != "Не фильтровать":
+                    try:
+                        filter_idx = headers.index(self.filter_column)
+                    except ValueError:
+                        filter_idx = None
 
-        # Обработка сводной таблицы (ДО закрытия книги!)
-        if self.pivot_settings:
-            try:
-                self.log_message.emit("Создание сводной таблицы...", QColor("blue"))
-
-                # Читаем данные из файла
-                processor = PivotTableProcessor(lambda _msg, _color: None)
-                pivot_data = processor.create_pivot_data(
-                    input_file,
-                    self.pivot_settings,
-                    self.filter_column
-                    if self.filter_column != "Не фильтровать"
-                    else "",
-                    self.filter_values or [],
-                )
-
-                if pivot_data:
-                    # Создаём форматы для сводной
-                    header_format = workbook.add_format(
-                        {
-                            "bold": self.styles.get("bold", False),
-                            "italic": self.styles.get("italic", False),
-                            "font_size": self.styles.get("font_size", 12),
-                            "font_name": self.styles.get("font_name", "Arial"),
-                            "bg_color": self.header_color,
-                            "align": "center",
-                            "valign": "vcenter",
-                        }
+                # Конвертация
+                if split_idx is not None:
+                    self._convert_with_split(
+                        workbook,
+                        reader,
+                        headers,
+                        split_idx,
+                        filter_idx,
+                        os.path.basename(input_file),
                     )
-                    if self.styles.get("border", 0) == 1:
-                        header_format.set_border(1)
-
-                    cached_formats = {"header": header_format}
-
-                    processor.write_pivot_table(
-                        workbook, pivot_data, self.pivot_settings, cached_formats
-                    )
-
-                    self.log_message.emit("Сводная таблица создана", QColor("green"))
                 else:
-                    self.log_message.emit(
-                        "Нет данных для сводной таблицы", QColor("orange")
+                    self._convert_without_split(
+                        workbook,
+                        reader,
+                        headers,
+                        filter_idx,
+                        os.path.basename(input_file),
                     )
 
-            except Exception as e:
-                self.log_message.emit(
-                    f"Ошибка сводной таблицы: {str(e)}", QColor("red")
-                )
+            if self.stop_flag:
+                result = "stopped"
+            else:
+                # Обработка сводной таблицы (ДО закрытия книги!)
+                if self.pivot_settings:
+                    try:
+                        self.log_message.emit(
+                            "Создание сводной таблицы...", QColor("blue")
+                        )
 
-        workbook.close()
-        self.output_file_path = output_path
+                        # Читаем данные из файла
+                        processor = PivotTableProcessor(lambda _msg, _color: None)
+                        pivot_data = processor.create_pivot_data(
+                            input_file,
+                            self.pivot_settings,
+                            self.filter_column
+                            if self.filter_column != "Не фильтровать"
+                            else "",
+                            self.filter_values or [],
+                        )
 
-        # Время обработки
-        elapsed = time.time() - start_time
-        minutes = int(elapsed // 60)
-        seconds = int(elapsed % 60)
+                        if pivot_data:
+                            # Создаём форматы для сводной
+                            header_format = workbook.add_format(
+                                {
+                                    "bold": self.styles.get("bold", False),
+                                    "italic": self.styles.get("italic", False),
+                                    "font_size": self.styles.get("font_size", 12),
+                                    "font_name": self.styles.get("font_name", "Arial"),
+                                    "bg_color": self.header_color,
+                                    "align": "center",
+                                    "valign": "vcenter",
+                                }
+                            )
+                            if self.styles.get("border", 0) == 1:
+                                header_format.set_border(1)
 
-        self.log_message.emit(
-            f"Файл сохранён: {os.path.basename(output_path)} ({minutes:02d}:{seconds:02d})",
-            QColor("green"),
-        )
+                            cached_formats = {"header": header_format}
 
-        return "success"
+                            processor.write_pivot_table(
+                                workbook,
+                                pivot_data,
+                                self.pivot_settings,
+                                cached_formats,
+                            )
+
+                            self.log_message.emit(
+                                "Сводная таблица создана", QColor("green")
+                            )
+                        else:
+                            self.log_message.emit(
+                                "Нет данных для сводной таблицы", QColor("orange")
+                            )
+
+                    except Exception as e:
+                        self.log_message.emit(
+                            f"Ошибка сводной таблицы: {str(e)}", QColor("red")
+                        )
+
+                result = "success"
+
+        except Exception as e:
+            self.log_message.emit(f"Ошибка конвертации: {str(e)}", QColor("red"))
+            result = "error"
+
+        finally:
+            # Гарантированно закрываем workbook
+            if workbook is not None:
+                try:
+                    workbook.close()
+                except Exception:
+                    pass
+
+            # При ошибке удаляем частичный файл
+            if result != "success" and os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except Exception:
+                    pass
+
+        if result == "success":
+            self.output_file_path = output_path
+
+            # Время обработки
+            elapsed = time.time() - start_time
+            minutes = int(elapsed // 60)
+            seconds = int(elapsed % 60)
+
+            self.log_message.emit(
+                f"Файл сохранён: {os.path.basename(output_path)} ({minutes:02d}:{seconds:02d})",
+                QColor("green"),
+            )
+
+        return result
 
     def _init_formats(self, workbook: xlsxwriter.Workbook):
         """Инициализирует кэш форматов."""
