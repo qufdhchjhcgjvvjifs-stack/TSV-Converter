@@ -609,6 +609,15 @@ def apply_theme_to_messagebox(msgbox: QMessageBox, is_dark: bool):
         widget.setAutoFillBackground(True)
 
 
+def get_widget_theme_flag(widget: QWidget) -> bool:
+    """Безопасно возвращает флаг тёмной темы для окна или диалога."""
+    if hasattr(widget, "_is_dark"):
+        return bool(getattr(widget, "_is_dark"))
+    if hasattr(widget, "_is_dark_theme"):
+        return bool(getattr(widget, "_is_dark_theme"))
+    return False
+
+
 # ============================================================================
 # LOADING OVERLAY
 # ============================================================================
@@ -1507,7 +1516,7 @@ class PivotSettingsDialog(QDialog):
                 QMessageBox.StandardButton.Ok,
                 self,
             )
-            apply_theme_to_messagebox(msgbox, self._is_dark_theme)
+            apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
             msgbox.exec()
             return
 
@@ -1519,7 +1528,7 @@ class PivotSettingsDialog(QDialog):
                 QMessageBox.StandardButton.Ok,
                 self,
             )
-            apply_theme_to_messagebox(msgbox, self._is_dark_theme)
+            apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
             msgbox.exec()
             return
 
@@ -1539,7 +1548,7 @@ class PivotSettingsDialog(QDialog):
                 QMessageBox.StandardButton.Ok,
                 self,
             )
-            apply_theme_to_messagebox(msgbox, self._is_dark_theme)
+            apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
             msgbox.exec()
             return
 
@@ -1551,7 +1560,7 @@ class PivotSettingsDialog(QDialog):
                 QMessageBox.StandardButton.Ok,
                 self,
             )
-            apply_theme_to_messagebox(msgbox, self._is_dark_theme)
+            apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
             msgbox.exec()
             return
 
@@ -1570,7 +1579,7 @@ class PivotSettingsDialog(QDialog):
                 QMessageBox.StandardButton.Ok,
                 self,
             )
-            apply_theme_to_messagebox(msgbox, self._is_dark_theme)
+            apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
             msgbox.exec()
             return
 
@@ -1699,7 +1708,7 @@ class PivotPreviewDialog(QDialog):
                 QMessageBox.StandardButton.Ok,
                 self,
             )
-            apply_theme_to_messagebox(msgbox, self._is_dark_theme)
+            apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
             msgbox.exec()
             return
 
@@ -1713,7 +1722,7 @@ class PivotPreviewDialog(QDialog):
                 QMessageBox.StandardButton.Ok,
                 self,
             )
-            apply_theme_to_messagebox(msgbox, self._is_dark_theme)
+            apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
             msgbox.exec()
             return
 
@@ -1760,7 +1769,7 @@ class PivotPreviewDialog(QDialog):
                     QMessageBox.StandardButton.Ok,
                     self,
                 )
-                apply_theme_to_messagebox(msgbox, self._is_dark_theme)
+                apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
                 msgbox.exec()
                 return
 
@@ -1777,7 +1786,7 @@ class PivotPreviewDialog(QDialog):
                 QMessageBox.StandardButton.Ok,
                 self,
             )
-            apply_theme_to_messagebox(msgbox, self._is_dark_theme)
+            apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
             msgbox.exec()
 
     def _fill_table(self):
@@ -1878,7 +1887,7 @@ class PivotPreviewDialog(QDialog):
                 QMessageBox.StandardButton.Ok,
                 self,
             )
-            apply_theme_to_messagebox(msgbox, self._is_dark_theme)
+            apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
             msgbox.exec()
             return
 
@@ -1976,7 +1985,7 @@ class PivotPreviewDialog(QDialog):
                     QMessageBox.StandardButton.Ok,
                     self,
                 )
-                apply_theme_to_messagebox(msgbox, self._is_dark_theme)
+                apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
                 msgbox.exec()
 
             except Exception as e:
@@ -1987,7 +1996,7 @@ class PivotPreviewDialog(QDialog):
                     QMessageBox.StandardButton.Ok,
                     self,
                 )
-                apply_theme_to_messagebox(msgbox, self._is_dark_theme)
+                apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
                 msgbox.exec()
 
 
@@ -2100,7 +2109,7 @@ class TSVPreviewDialog(QDialog):
                 QMessageBox.StandardButton.Ok,
                 self,
             )
-            apply_theme_to_messagebox(msgbox, self._is_dark_theme)
+            apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
             msgbox.exec()
 
     def _load_page_data(self):
@@ -2141,7 +2150,7 @@ class TSVPreviewDialog(QDialog):
                 QMessageBox.StandardButton.Ok,
                 self,
             )
-            apply_theme_to_messagebox(msgbox, self._is_dark_theme)
+            apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
             msgbox.exec()
 
     def _update_page_info(self):
