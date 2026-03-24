@@ -161,7 +161,7 @@ class TSVConverterApp:
                 total += FileUtilities.count_rows(
                     file_path, delimiter, encoding, filter_idx, filter_vals
                 )
-            except Exception as e:
+            except (OSError, IOError, UnicodeDecodeError) as e:
                 self._log_message(f"Ошибка подсчёта строк: {e}", QColor("red"))
 
         self.window.total_rows_label.setText(f"Строк: {total}")
@@ -380,8 +380,12 @@ class TSVConverterApp:
         msgbox.exec()
 
         if self.converter and self.converter.output_file_path:
-            if self.converter.auto_open and os.path.exists(self.converter.output_file_path):
-                QDesktopServices.openUrl(QUrl.fromLocalFile(self.converter.output_file_path))
+            if self.converter.auto_open and os.path.exists(
+                self.converter.output_file_path
+            ):
+                QDesktopServices.openUrl(
+                    QUrl.fromLocalFile(self.converter.output_file_path)
+                )
 
             if self.converter.auto_delete and self.converter.input_files:
                 for src_file in self.converter.input_files:
@@ -618,7 +622,7 @@ class TSVConverterApp:
                     QColor("green"),
                 )
 
-            except Exception as e:
+            except (OSError, IOError, PermissionError) as e:
                 msgbox = self._show_message_box(
                     QMessageBox.Icon.Critical,
                     "Ошибка",

@@ -2115,7 +2115,7 @@ class TSVPreviewDialog(QDialog):
                 self._total_rows = sum(1 for _ in reader)
 
             self._update_page_info()
-        except Exception as e:
+        except (OSError, IOError, UnicodeDecodeError) as e:
             msgbox = QMessageBox(
                 QMessageBox.Icon.Critical,
                 "Ошибка",
@@ -2163,7 +2163,7 @@ class TSVPreviewDialog(QDialog):
 
             if self._active_search_text:
                 self._highlight_search_matches_on_page()
-        except Exception as e:
+        except (OSError, IOError, UnicodeDecodeError) as e:
             msgbox = QMessageBox(
                 QMessageBox.Icon.Critical,
                 "Ошибка",
@@ -2728,7 +2728,8 @@ class MainWindow(QMainWindow):
                 rows = FileUtilities.count_rows(
                     file_path, delimiter, encoding, None, None
                 )
-                total_rows += rows
+                if rows > 0:
+                    total_rows += rows
 
                 # Чтение заголовков первого файла
                 if first_headers is None:
