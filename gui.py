@@ -1541,7 +1541,7 @@ class PivotSettingsDialog(QDialog):
         self.accept()
 
     def _show_preview(self):
-        """Показывает предпросмо��р сводной таблицы."""
+        """Показывает предпросмотр сводной таблицы."""
         from PySide6.QtWidgets import QApplication
 
         settings = self.get_settings()
@@ -1550,7 +1550,7 @@ class PivotSettingsDialog(QDialog):
             msgbox = QMessageBox(
                 QMessageBox.Icon.Warning,
                 "Предупреждение",
-                "Выберите хотя бы одн�� поле для стр��к или столбцов",
+                "Выберите хотя бы одно поле для строк или столбцов",
                 QMessageBox.StandardButton.Ok,
                 self,
             )
@@ -1604,7 +1604,7 @@ class PivotSettingsDialog(QDialog):
                 if hasattr(main_window, "filter_column_combo")
                 else "Не фильтровать"
             )
-            if filter_col_text != "Не ��ильтровать" and hasattr(
+            if filter_col_text != "Не фильтровать" and hasattr(
                 main_window, "_filter_values"
             ):
                 filter_values = list(
@@ -1613,7 +1613,7 @@ class PivotSettingsDialog(QDialog):
             else:
                 filter_values = []
 
-        # Добавляем значения ф��льтра в настройки
+        # Добавляем значения фильтра в настройки
         settings["filter_values"] = filter_values
         settings["filter_column"] = (
             filter_col_text if filter_col_text != "Не фильтровать" else ""
@@ -1628,7 +1628,7 @@ class PivotSettingsDialog(QDialog):
         preview_dialog.exec()
 
     def get_settings(self) -> Dict[str, Any]:
-        """��озвращает настройки сводной таблицы."""
+        """Возвращает настройки сводной таблицы."""
         values_settings = []
         for row in range(self.values_table.rowCount()):
             value_combo = self.values_table.cellWidget(row, 0)
@@ -1744,7 +1744,7 @@ class PivotPreviewDialog(QDialog):
             filter_vals = self._settings.get("filter_values", [])
 
             # Отладка
-            # print(f"[Preview] Фильтр: колонка={filter_col}, зна��ения={filter_vals}")
+            # print(f"[Preview] Фильтр: колонка={filter_col}, значения={filter_vals}")
             # print(f"[Preview] Настройки: {self._settings}")
             # print(
             #     f"[Preview] _filter_values в main_window: {getattr(main_window, '_filter_values', {})}"
@@ -1932,7 +1932,7 @@ class PivotPreviewDialog(QDialog):
                 for col, header in enumerate(self._settings.get("rows", [])):
                     worksheet.write(0, col, header, header_format)
 
-                # Заголовки столбцо��
+                # Заголовки столбцов
                 row_values = sorted(self._pivot_data.keys())
                 col_values = sorted(
                     set(col for row in self._pivot_data.values() for col in row.keys())
@@ -1959,7 +1959,7 @@ class PivotPreviewDialog(QDialog):
                         worksheet.write(row_idx, 0, str(row_value), cell_format)
                         current_col = 1
 
-                    # Агрегированные значен��я
+                    # Агрегированные значения
                     for col_value in col_values:
                         for val_setting in value_settings:
                             key = f"{val_setting['field']}_{val_setting['aggregation']}"
@@ -2479,7 +2479,7 @@ class MainWindow(QMainWindow):
         return widget
 
     def _create_settings_panel(self) -> QWidget:
-        """Панель н��строек конвертации."""
+        """Панель настроек конвертации."""
         widget = QWidget()
         layout = QGridLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
