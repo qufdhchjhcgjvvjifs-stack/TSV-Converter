@@ -2021,6 +2021,8 @@ class TSVPreviewDialog(QDialog):
         self._rows_per_page = 100
         self._headers = []
         self._total_rows = 0
+        self._encoding = "utf-8"
+        self._delimiter = "\t"
 
         self._init_ui()
         apply_theme_to_dialog(self, self._is_dark)
@@ -2091,14 +2093,22 @@ class TSVPreviewDialog(QDialog):
     def _load_file_info(self):
         """Загружает информацию о файле."""
         try:
-            # Простая реализация - будет заменена на утилиты из converter.py
-            with open(self._file_path, "r", encoding="utf-8", errors="replace") as f:
-                first_line = f.readline()
-                self._headers = first_line.strip().split("\t")
+            self._encoding = FileUtilities.get_encoding(self._file_path)
+            self._delimiter = FileUtilities.get_delimiter(self._file_path)
+
+            with open(
+                self._file_path, "r", encoding=self._encoding, errors="replace"
+            ) as f:
+                reader = csv.reader(f, delimiter=self._delimiter)
+                headers = next(reader, [])
+                self._headers = headers if headers else []
+
+                self.search_column_combo.clear()
+                self.search_column_combo.addItem("Все столбцы")
                 self.search_column_combo.addItems(self._headers)
 
-                # Подсчёт строк
-                self._total_rows = sum(1 for _ in f)
+                # Подсчёт строк данных без заголовка
+                self._total_rows = sum(1 for _ in reader)
 
             self._update_page_info()
         except Exception as e:
@@ -2120,25 +2130,29 @@ class TSVPreviewDialog(QDialog):
             self.table_widget.clear()
             self.table_widget.setColumnCount(len(self._headers))
             self.table_widget.setHorizontalHeaderLabels(self._headers)
+            self.table_widget.setRowCount(0)
 
-            with open(self._file_path, "r", encoding="utf-8", errors="replace") as f:
+            with open(
+                self._file_path, "r", encoding=self._encoding, errors="replace"
+            ) as f:
+                reader = csv.reader(f, delimiter=self._delimiter)
+
                 # Пропускаем заголовок
-                next(f)
+                next(reader, None)
 
                 # Пропускаем до нужной строки
                 for _ in range(start_row):
-                    next(f, None)
+                    next(reader, None)
 
                 # Читаем страницу
                 for row_idx in range(self._rows_per_page):
-                    line = f.readline()
-                    if not line:
+                    values = next(reader, None)
+                    if values is None:
                         break
 
                     self.table_widget.insertRow(row_idx)
-                    values = line.strip().split("\t")
                     for col_idx, value in enumerate(values):
-                        item = QTableWidgetItem(value)
+                        item = QTableWidgetItem(str(value))
                         self.table_widget.setItem(row_idx, col_idx, item)
 
             self.table_widget.resizeColumnsToContents()
