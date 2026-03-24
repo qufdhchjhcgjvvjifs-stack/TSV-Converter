@@ -2024,6 +2024,10 @@ class TSVPreviewDialog(QDialog):
         self._encoding = "utf-8"
         self._delimiter = "\t"
 
+        self._active_search_text = ""
+        self._active_search_column = -1
+        self._search_match_positions = []
+
         self._init_ui()
         apply_theme_to_dialog(self, self._is_dark)
         self._load_file_info()
@@ -2156,6 +2160,9 @@ class TSVPreviewDialog(QDialog):
                         self.table_widget.setItem(row_idx, col_idx, item)
 
             self.table_widget.resizeColumnsToContents()
+
+            if self._active_search_text:
+                self._highlight_search_matches_on_page()
         except Exception as e:
             msgbox = QMessageBox(
                 QMessageBox.Icon.Critical,
@@ -2197,14 +2204,83 @@ class TSVPreviewDialog(QDialog):
         self._load_page_data()
         self._update_page_info()
 
+    def _row_matches_search(self, values: list, search_text: str, column_idx: int) -> bool:
+        """Проверяет, соответствует ли строка критерию поиска."""
+        search_lower = search_text.lower()
+        if column_idx >= 0 and column_idx < len(values):
+            return search_lower in str(values[column_idx]).lower()
+        for value in values:
+            if search_lower in str(value).lower():
+                return True
+        return False
+
+    def _highlight_search_matches_on_page(self):
+        """Подсвечивает ячейки с совпадениями на текущей странице."""
+        if not self._active_search_text:
+            return
+        search_lower = self._active_search_text.lower()
+        for row_idx in range(self.table_widget.rowCount()):
+            for col_idx in range(self.table_widget.columnCount()):
+                item = self.table_widget.item(row_idx, col_idx)
+                if item and search_lower in item.text().lower():
+                    item.setBackground(QColor(255, 255, 0))
+                else:
+                    item.setBackground(QPalette().window())
+
     def _search(self):
         """Выполняет поиск по файлу."""
-        search_text = self.search_edit.text().lower()
+        search_text = self.search_edit.text()
+        column_text = self.search_column_combo.currentText()
+
         if not search_text:
+            self._active_search_text = ""
+            self._search_match_positions = []
+            self.search_info_label.setText("")
+            self._load_page_data()
             return
 
-        # Простая реализация поиска
-        self.search_info_label.setText("Поиск...")
+        search_lower = search_text.lower()
+        column_idx = -1
+        if column_text != "Все столбцы" and self._headers:
+            try:
+                column_idx = self._headers.index(column_text)
+            except ValueError:
+                column_idx = -1
+
+        self._active_search_text = search_text
+        self._active_search_column = column_idx
+        self._search_match_positions = []
+
+        try:
+            with open(
+                self._file_path, "r", encoding=self._encoding, errors="replace"
+            ) as f:
+                reader = csv.reader(f, delimiter=self._delimiter)
+                next(reader, None)
+
+                for row_idx, row in enumerate(reader):
+                    if self._row_matches_search(row, search_lower, column_idx):
+                        self._search_match_positions.append(row_idx)
+
+        except Exception as e:
+            self.search_info_label.setText(f"Ошибка поиска: {e}")
+            return
+
+        if not self._search_match_positions:
+            self.search_info_label.setText("Ничего не найдено")
+            return
+
+        first_match_row = self._search_match_positions[0]
+        match_page = first_match_row // self._rows_per_page + 1
+
+        total_matches = len(self._search_match_positions)
+        self.search_info_label.setText(
+            f"Найдено: {total_matches}, первая на стр. {match_page}"
+        )
+
+        self._current_page = match_page
+        self._load_page_data()
+        self._update_page_info()
 
 
 # ============================================================================
