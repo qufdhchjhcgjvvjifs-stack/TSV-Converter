@@ -303,6 +303,9 @@ class FileUtilities:
         if used_names is None:
             used_names = set()
 
+        name = name.strip()
+        name = name.strip("'").strip()
+
         # Удаляем запрещённые символы
         invalid_chars = [":", "\\", "/", "?", "*", "[", "]"]
         for char in invalid_chars:
@@ -490,12 +493,10 @@ class TSVToExcelConverter(QThread):
                     self._finish_as_stopped()
                     return
 
-                # Обновляем информацию о текущем файле
-                progress_data = ProgressData(
-                    current_file=os.path.basename(tsv_file),
-                    current_operation="Чтение файла..."
+                # Обновляем информацию о текущем файле без сброса метрик прогресса
+                self._emit_progress_update(
+                    os.path.basename(tsv_file), "Чтение файла...", force=True
                 )
-                self.progress_data.emit(progress_data)
 
                 conversion_result = self._convert_file(tsv_file, processed)
                 if conversion_result == "success":
