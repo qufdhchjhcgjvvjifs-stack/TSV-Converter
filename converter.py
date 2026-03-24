@@ -194,13 +194,13 @@ class FileUtilities:
     @staticmethod
     def get_encoding(file_path: str) -> str:
         """
-        Определяет кодировку файла по BOM или расширению.
+        Определяет кодировку файла по BOM или содержимому.
 
         Args:
             file_path: Путь к файлу
 
         Returns:
-            Название кодировки ('utf-8', 'utf-16', 'windows-1251')
+            Название кодировки ('utf-8', 'utf-8-sig', 'utf-16', 'windows-1251')
         """
         try:
             with open(file_path, "rb") as f:
@@ -218,9 +218,14 @@ class FileUtilities:
                 elif raw_data.startswith(b"\xef\xbb\xbf"):
                     return "utf-8-sig"
                 else:
-                    # Эвристика по расширению
+                    # Пробуем UTF-8 first, затем windows-1251
                     if file_path.lower().endswith(".csv"):
-                        return "windows-1251"
+                        try:
+                            with open(file_path, "r", encoding="utf-8") as f:
+                                f.read(8192)
+                            return "utf-8"
+                        except UnicodeDecodeError:
+                            return "windows-1251"
                     else:
                         return "utf-8"
         except Exception:
