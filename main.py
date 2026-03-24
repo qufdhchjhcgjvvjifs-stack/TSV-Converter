@@ -63,13 +63,13 @@ class TSVConverterApp:
         self.window.conversion_stopped.connect(self._stop_conversion)
         self.window.files_added.connect(self._on_files_added)
 
-        # Кнопки действий
-        self.window.open_file_btn.clicked.connect(self._open_converted_file)
-        self.window.delete_file_btn.clicked.connect(self._delete_converted_file)
-        self.window.export_report_btn.clicked.connect(self._export_report)
+        # Сигналы действий
+        self.window.open_converted_file_requested.connect(self._open_converted_file)
+        self.window.delete_converted_file_requested.connect(self._delete_converted_file)
+        self.window.export_report_requested.connect(self._export_report)
+        self.window.preview_requested.connect(self._preview_file)
+        self.window.pivot_settings_requested.connect(self._show_pivot_settings)
         # Кнопка настроек уже подключена в MainWindow._show_settings
-        self.window.preview_btn.clicked.connect(self._preview_file)
-        self.window.pivot_btn.clicked.connect(self._show_pivot_settings)
 
         # Сигналы
         self.window.settings_saved.connect(self._on_settings_saved)

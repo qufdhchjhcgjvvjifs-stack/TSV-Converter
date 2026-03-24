@@ -2201,6 +2201,11 @@ class MainWindow(QMainWindow):
     )
     conversion_stopped = Signal()
     files_added = Signal(object)  # list of file paths
+    preview_requested = Signal()
+    pivot_settings_requested = Signal()
+    open_converted_file_requested = Signal()
+    delete_converted_file_requested = Signal()
+    export_report_requested = Signal()
     settings_saved = Signal(dict)
     files_processing_started = Signal(object)  # list of file paths
     files_processing_finished = Signal(object)  # list of file paths
@@ -2718,19 +2723,8 @@ class MainWindow(QMainWindow):
             self.log_message("Файл удалён из списка", QColor("orange"))
 
     def _preview_file(self):
-        """Предпросмотр выбранного файла."""
-        current_item = self.file_list.currentItem()
-        if not current_item:
-            msgbox = self._show_message_box(
-                QMessageBox.Icon.Warning,
-                "Предупреждение",
-                "Выберите файл для предпросмотра",
-            )
-            msgbox.exec()
-            return
-
-        # Здесь будет вызов диалога предпросмотра
-        self.log_message(f"Предпросмотр: {current_item.text()}", QColor("blue"))
+        """Запрашивает предпросмотр выбранного файла."""
+        self.preview_requested.emit()
 
     def _select_output_directory(self):
         """Выбор директории для сохранения."""
@@ -2817,16 +2811,8 @@ class MainWindow(QMainWindow):
         self.log_message("Конвертация остановлена пользователем", QColor("orange"))
 
     def _show_pivot_settings(self):
-        """Показать настройки сводной таблицы."""
-        if self.file_list.count() == 0:
-            msgbox = self._show_message_box(
-                QMessageBox.Icon.Warning, "Предупреждение", "Сначала добавьте файл"
-            )
-            msgbox.exec()
-            return
-
-        # Здесь будет вызов диалога настрое�� сводной таблицы
-        self.log_message("Настройки сводной таблицы", QColor("blue"))
+        """Запрашивает открытие настроек сводной таблицы."""
+        self.pivot_settings_requested.emit()
 
     def _show_settings(self):
         """Показать настройки приложения."""
@@ -2840,24 +2826,16 @@ class MainWindow(QMainWindow):
             self.log_message("Настройки сохранены", QColor("green"))
 
     def _open_converted_file(self):
-        """Открыть сконвертирова��ный файл."""
-        self.log_message("Открытие файла...", QColor("blue"))
+        """Запрашивает открытие сконвертированного файла."""
+        self.open_converted_file_requested.emit()
 
     def _delete_converted_file(self):
-        """Удалить сконвертированный файл."""
-        msgbox = self._show_message_box(
-            QMessageBox.Icon.Question,
-            "Подтверждение",
-            "Удалить сконвертированный файл?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        reply = msgbox.exec()
-        if reply == QMessageBox.StandardButton.Yes:
-            self.log_message("Файл удалё��", QColor("red"))
+        """Запрашивает удаление сконвертированного файла."""
+        self.delete_converted_file_requested.emit()
 
     def _export_report(self):
-        """Экспорт отчёта."""
-        self.log_message("Экспорт отчёта...", QColor("blue"))
+        """Запрашивает экспорт отчёта."""
+        self.export_report_requested.emit()
 
     # ========================================================================
     # ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ
