@@ -332,7 +332,11 @@ class TSVConverterApp:
         self.converter.progress_data.connect(self.window.update_progress_details)
         self.converter.log_message.connect(self._log_message)
         self.converter.finished_signal.connect(self._on_conversion_finished)
+        self.converter.stopped_signal.connect(self._on_conversion_stopped)
         self.converter.error.connect(self._on_conversion_error)
+
+        self.window.open_file_btn.setEnabled(False)
+        self.window.delete_file_btn.setEnabled(False)
 
         # Запускаем
         self.converter.start()
@@ -352,8 +356,9 @@ class TSVConverterApp:
     def _on_conversion_finished(self):
         """Обработчик завершения конвертации."""
         self._timer.stop()
-        self.window.open_file_btn.setEnabled(True)
-        self.window.delete_file_btn.setEnabled(True)
+        has_output = bool(self.converter and self.converter.output_file_path)
+        self.window.open_file_btn.setEnabled(has_output)
+        self.window.delete_file_btn.setEnabled(has_output)
         self.window.start_btn.setEnabled(True)
         self.window.stop_btn.setEnabled(False)
         self.window.progress_bar.setValue(100)
@@ -374,9 +379,38 @@ class TSVConverterApp:
         )
         msgbox.exec()
 
+    def _on_conversion_stopped(self):
+        """Обработчик пользовательской остановки конвертации."""
+        self._timer.stop()
+        self.window.open_file_btn.setEnabled(False)
+        self.window.delete_file_btn.setEnabled(False)
+        self.window.start_btn.setEnabled(True)
+        self.window.stop_btn.setEnabled(False)
+
+        # Сброс панели прогресса
+        self.window.reset_progress_details()
+
+        if self._start_time:
+            elapsed = (datetime.now() - self._start_time).total_seconds()
+            minutes = int(elapsed // 60)
+            seconds = int(elapsed % 60)
+            self._log_message(
+                f"Конвертация остановлена через {minutes:02d}:{seconds:02d}",
+                QColor("orange"),
+            )
+
+        msgbox = self._show_message_box(
+            QMessageBox.Icon.Warning,
+            "Предупреждение",
+            "Конвертация остановлена пользователем. Результат может быть неполным.",
+        )
+        msgbox.exec()
+
     def _on_conversion_error(self, error: str):
         """Обработчик ошибки конвертации."""
         self._timer.stop()
+        self.window.open_file_btn.setEnabled(False)
+        self.window.delete_file_btn.setEnabled(False)
         self.window.start_btn.setEnabled(True)
         self.window.stop_btn.setEnabled(False)
 

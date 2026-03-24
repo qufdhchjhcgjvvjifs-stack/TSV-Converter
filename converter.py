@@ -385,6 +385,7 @@ class TSVToExcelConverter(QThread):
     progress_data = Signal(object)  # ProgressData
     log_message = Signal(str, QColor)
     finished_signal = Signal()
+    stopped_signal = Signal()
     error = Signal(str)
 
     def __init__(
@@ -443,6 +444,10 @@ class TSVToExcelConverter(QThread):
             # Подсчёт общего количества строк
             self._count_total_rows()
 
+            if self.stop_flag:
+                self._finish_as_stopped()
+                return
+
             # Инициализация трекера прогресса
             self.progress_tracker.reset(self.total_rows)
             self.progress_tracker.start()
@@ -451,10 +456,8 @@ class TSVToExcelConverter(QThread):
             processed = 0
             for tsv_file in self.input_files:
                 if self.stop_flag:
-                    self.log_message.emit(
-                        "Конвертация прервана пользователем", QColor("orange")
-                    )
-                    break
+                    self._finish_as_stopped()
+                    return
 
                 # Обновляем информацию о текущем файле
                 progress_data = ProgressData(
@@ -463,8 +466,12 @@ class TSVToExcelConverter(QThread):
                 )
                 self.progress_data.emit(progress_data)
 
-                if self._convert_file(tsv_file, processed):
+                conversion_result = self._convert_file(tsv_file, processed)
+                if conversion_result == "success":
                     processed += 1
+                elif conversion_result == "stopped":
+                    self._finish_as_stopped()
+                    return
                 else:
                     self.log_message.emit(
                         f"Ошибка обработки файла: {os.path.basename(tsv_file)}",
@@ -480,6 +487,15 @@ class TSVToExcelConverter(QThread):
         except Exception as e:
             self.log_message.emit(f"Критическая ошибка: {str(e)}", QColor("red"))
             self.error.emit(str(e))
+
+    def _finish_as_stopped(self):
+        """Завершает поток в статусе пользовательской остановки."""
+        self.output_file_path = None
+        self.log_message.emit(
+            "Конвертация остановлена пользователем. Результат может быть неполным.",
+            QColor("orange"),
+        )
+        self.stopped_signal.emit()
 
     def _count_total_rows(self):
         """Подсчитывает общее количество строк для прогресс-бара."""
@@ -534,7 +550,7 @@ class TSVToExcelConverter(QThread):
             f"Всего строк для обработки: {self.total_rows}", QColor("blue")
         )
 
-    def _convert_file(self, input_file: str, _processed_files: int) -> bool:
+    def _convert_file(self, input_file: str, _processed_files: int) -> str:
         """
         Конвертирует один файл.
 
@@ -543,7 +559,7 @@ class TSVToExcelConverter(QThread):
             _processed_files: Количество уже обработанных файлов (не используется)
 
         Returns:
-            True если успешно
+            `success`, `stopped` или `error`
         """
         start_time = time.time()
 
@@ -568,15 +584,15 @@ class TSVToExcelConverter(QThread):
                 f"Ошибка доступа к файлу {os.path.basename(input_file)}. Возможно, он открыт в другой программе (Excel?). Закройте файл и попробуйте снова.",
                 QColor("red"),
             )
-            return False
+            return "error"
         except Exception as e:
             self.log_message.emit(
                 f"Ошибка конвертации {os.path.basename(input_file)}: {str(e)}",
                 QColor("red"),
             )
-            return False
+            return "error"
 
-    def _convert_to_csv(self, input_file: str, encoding: str, delimiter: str, start_time: float) -> bool:
+    def _convert_to_csv(self, input_file: str, encoding: str, delimiter: str, start_time: float) -> str:
         """Конвертация в CSV."""
         base_name = os.path.splitext(os.path.basename(input_file))[0]
         
@@ -587,7 +603,7 @@ class TSVToExcelConverter(QThread):
                 headers = next(reader)
             except StopIteration:
                 self.log_message.emit("Пустой файл", QColor("red"))
-                return False
+                return "error"
 
             # Индексы
             split_idx = None
@@ -611,6 +627,10 @@ class TSVToExcelConverter(QThread):
             else:
                 self._write_single_csv(reader, headers, base_name, filter_idx)
 
+        if self.stop_flag:
+            self.output_file_path = None
+            return "stopped"
+
         # Сводная таблица для CSV (отдельный файл)
         if self.pivot_settings:
             self._create_csv_pivot(input_file, base_name)
@@ -622,7 +642,7 @@ class TSVToExcelConverter(QThread):
             f"Конвертация в CSV завершена ({minutes:02d}:{seconds:02d})",
             QColor("green"),
         )
-        return True
+        return "success"
 
     def _write_single_csv(self, reader, headers, base_name, filter_idx):
         output_path = os.path.join(self.output_directory, f"{base_name}.csv")
@@ -733,7 +753,7 @@ class TSVToExcelConverter(QThread):
         except Exception as e:
             self.log_message.emit(f"Ошибка CSV сводной: {e}", QColor("red"))
 
-    def _convert_to_xlsx(self, input_file: str, encoding: str, delimiter: str, start_time: float) -> bool:
+    def _convert_to_xlsx(self, input_file: str, encoding: str, delimiter: str, start_time: float) -> str:
         """Стандартная конвертация в XLSX (перенесенная логика)."""
         # Имя выходного файла
         base_name = os.path.splitext(os.path.basename(input_file))[0]
@@ -757,7 +777,7 @@ class TSVToExcelConverter(QThread):
             except StopIteration:
                 self.log_message.emit("Пустой файл", QColor("red"))
                 workbook.close()
-                return False
+                return "error"
 
             # Индексы
             split_idx = None
@@ -782,6 +802,11 @@ class TSVToExcelConverter(QThread):
                 )
             else:
                 self._convert_without_split(workbook, reader, headers, filter_idx, os.path.basename(input_file))
+
+        if self.stop_flag:
+            workbook.close()
+            self.output_file_path = None
+            return "stopped"
 
         # Обработка сводной таблицы (ДО закрытия книги!)
         if self.pivot_settings:
@@ -847,7 +872,7 @@ class TSVToExcelConverter(QThread):
             QColor("green"),
         )
 
-        return True
+        return "success"
 
     def _init_formats(self, workbook: xlsxwriter.Workbook):
         """Инициализирует кэш форматов."""
