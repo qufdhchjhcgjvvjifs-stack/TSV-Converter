@@ -980,6 +980,9 @@ class CheckBoxListWidget(QListWidget):
         # Хранилище состояний чекбоксов: row -> Qt.CheckState
         self._check_states: Dict[int, Qt.CheckState] = {}
 
+        # Callback для уведомления об изменении состояния чекбокса
+        self._on_check_state_changed = None
+
     def set_theme(self, is_dark: bool):
         """Обновляет тему для delegate."""
         self._is_dark = is_dark
@@ -990,6 +993,8 @@ class CheckBoxListWidget(QListWidget):
         """Устанавливает состояние чекбокса для элемента."""
         self._check_states[row] = state
         self.viewport().update()
+        if self._on_check_state_changed:
+            self._on_check_state_changed()
 
     def get_item_check_state(self, row: int) -> Qt.CheckState:
         """Получает состояние чекбокса для элемента."""
@@ -1197,6 +1202,7 @@ class ColumnValuesDialog(QDialog):
         # Передаём тему для корректной отрисовки чекбоксов в Windows 11
         self.value_list = CheckBoxListWidget(parent=self, is_dark=self._is_dark)
         self.value_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.value_list._on_check_state_changed = self._update_info
 
         # Добавляем элементы с чекбоксами
         for value in self._values:
@@ -2719,6 +2725,8 @@ class MainWindow(QMainWindow):
         total_rows = 0
         first_headers = None
 
+        files_with_rows = []
+
         for file_path in files:
             try:
                 encoding = FileUtilities.get_encoding(file_path)
@@ -2730,6 +2738,7 @@ class MainWindow(QMainWindow):
                 )
                 if rows > 0:
                     total_rows += rows
+                    files_with_rows.append((file_path, rows))
 
                 # Чтение заголовков первого файла
                 if first_headers is None:
@@ -2741,7 +2750,7 @@ class MainWindow(QMainWindow):
                 # Продолжаем обработку даже если один файл не удался
                 continue
 
-        return (files, total_rows, first_headers)
+        return (files_with_rows, total_rows, first_headers)
 
     def _on_files_processing_finished(self, result: tuple):
         """Обработчик завершения обработки файлов."""
@@ -2752,27 +2761,41 @@ class MainWindow(QMainWindow):
         self.setEnabled(True)
 
         # Распаковываем результат
-        files, total_rows, headers = result
+        files_with_rows, added_rows, headers = result
 
-        # Добавляем файлы в список
-        self.file_list.clear()
-        self.file_list.addItems(files)
+        # Добавляем файлы в список с сохранением количества строк в userData
+        for file_path, row_count in files_with_rows:
+            item = QListWidgetItem(file_path)
+            item.setData(Qt.ItemDataRole.UserRole, row_count)
+            self.file_list.addItem(item)
 
         # Обновляем состояние комбобоксов split/filter (блокируем при нескольких файлах)
         self._update_split_filter_state()
 
-        # Обновляем комбобоксы столбцов
+        # Обновляем комбобоксы столбцов (только если нет заголовков или есть новые)
         if headers:
-            self._update_column_combos(headers)
+            existing_count = self.file_list.count() - len(files_with_rows)
+            if existing_count == 0:
+                self._update_column_combos(headers)
 
-        # Обновляем количество строк
-        self.total_rows_label.setText(f"Строк: {total_rows:,}")
+        # Обновляем количество строк (прибавляем к существующему)
+        current_text = self.total_rows_label.text()
+        current_total = 0
+        if "Строк: " in current_text:
+            try:
+                current_total = int(
+                    current_text.replace("Строк: ", "").replace(",", "")
+                )
+            except ValueError:
+                pass
+        new_total = current_total + added_rows
+        self.total_rows_label.setText(f"Строк: {new_total:,}")
 
         # Emit сигнал
-        self.files_added.emit(list(files))
+        self.files_added.emit([f for f, _ in files_with_rows])
 
         self.log_message(
-            f"Добавлено файлов: {len(files)}, всего строк: {total_rows:,}",
+            f"Добавлено файлов: {len(files_with_rows)}, строк: {added_rows:,}, всего: {new_total:,}",
             QColor("green"),
         )
 
@@ -2844,7 +2867,21 @@ class MainWindow(QMainWindow):
         current_item = self.file_list.currentItem()
         if current_item:
             row = self.file_list.row(current_item)
+            row_count = current_item.data(Qt.ItemDataRole.UserRole) or 0
             self.file_list.takeItem(row)
+
+            # Вычитаем строки удалённого файла
+            current_text = self.total_rows_label.text()
+            if "Строк: " in current_text:
+                try:
+                    current_total = int(
+                        current_text.replace("Строк: ", "").replace(",", "")
+                    )
+                    new_total = max(0, current_total - row_count)
+                    self.total_rows_label.setText(f"Строк: {new_total:,}")
+                except ValueError:
+                    pass
+
             self._update_split_filter_state()
             self.log_message("Файл удалён из списка", QColor("orange"))
 
