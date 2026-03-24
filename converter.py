@@ -271,37 +271,6 @@ class FileUtilities:
             return "\t"
 
     @staticmethod
-    def is_network_path(file_path: str) -> bool:
-        """
-        Проверяет, является ли путь сетевым.
-
-        Args:
-            file_path: Путь к файлу
-
-        Returns:
-            True если путь сетевой
-        """
-        # UNC путь
-        if file_path.startswith("\\\\"):
-            return True
-
-        # Проверка сетевого диска (только Windows)
-        if os.name == "nt" and ":" in file_path:
-            try:
-                import ctypes
-
-                drive, _ = os.path.splitdrive(file_path)
-                if drive:
-                    drive_path = drive + "\\"
-                    DRIVE_REMOTE = 4
-                    drive_type = ctypes.windll.kernel32.GetDriveTypeW(drive_path)
-                    return drive_type == DRIVE_REMOTE
-            except Exception:
-                pass
-
-        return False
-
-    @staticmethod
     def sanitize_sheet_name(name: str, used_names: Optional[Set[str]] = None) -> str:
         """
         Очищает имя листа для Excel.
@@ -610,13 +579,13 @@ class TSVToExcelConverter(QThread):
             f"Всего строк для обработки: {self.total_rows}", QColor("blue")
         )
 
-    def _convert_file(self, input_file: str, _processed_files: int) -> str:
+    def _convert_file(self, input_file: str, processed_files: int) -> str:
         """
         Конвертирует один файл.
 
         Args:
             input_file: Путь к входному файлу
-            _processed_files: Количество уже обработанных файлов (не используется)
+            processed_files: Количество уже обработанных файлов (для уникальности имени)
 
         Returns:
             `success`, `stopped` или `error`
@@ -635,10 +604,12 @@ class TSVToExcelConverter(QThread):
 
             # Выбор стратегии в зависимости от формата
             if self.output_format.lower() == "csv":
-                return self._convert_to_csv(input_file, encoding, delimiter, start_time)
+                return self._convert_to_csv(
+                    input_file, encoding, delimiter, start_time, processed_files
+                )
             else:
                 return self._convert_to_xlsx(
-                    input_file, encoding, delimiter, start_time
+                    input_file, encoding, delimiter, start_time, processed_files
                 )
 
         except PermissionError:
@@ -655,10 +626,17 @@ class TSVToExcelConverter(QThread):
             return "error"
 
     def _convert_to_csv(
-        self, input_file: str, encoding: str, delimiter: str, start_time: float
+        self,
+        input_file: str,
+        encoding: str,
+        delimiter: str,
+        start_time: float,
+        file_index: int = 0,
     ) -> str:
         """Конвертация в CSV."""
         base_name = os.path.splitext(os.path.basename(input_file))[0]
+        if file_index > 0:
+            base_name = f"{base_name}_{file_index + 1}"
 
         with open(input_file, "r", encoding=encoding, errors="replace") as f:
             reader = csv.reader(f, delimiter=delimiter)
@@ -884,11 +862,18 @@ class TSVToExcelConverter(QThread):
             self.log_message.emit(f"Ошибка CSV сводной: {e}", QColor("red"))
 
     def _convert_to_xlsx(
-        self, input_file: str, encoding: str, delimiter: str, start_time: float
+        self,
+        input_file: str,
+        encoding: str,
+        delimiter: str,
+        start_time: float,
+        file_index: int = 0,
     ) -> str:
         """Стандартная конвертация в XLSX (перенесенная логика)."""
         # Имя выходного файла
         base_name = os.path.splitext(os.path.basename(input_file))[0]
+        if file_index > 0:
+            base_name = f"{base_name}_{file_index + 1}"
         output_path = os.path.join(self.output_directory, f"{base_name}.xlsx")
 
         workbook = None
@@ -1323,12 +1308,6 @@ class PivotTableProcessor:
         try:
             self.log_callback("Создание сводной таблицы...", QColor("blue"))
 
-            # Отладка
-            # print(f"[Pivot] Файл: {file_path}")
-            # print(
-            #     f"[Pivot] Настройки: rows={settings.get('rows')}, cols={settings.get('columns')}, values={settings.get('values')}"
-            # )
-
             encoding = FileUtilities.get_encoding(file_path)
             delimiter = FileUtilities.get_delimiter(file_path)
 
@@ -1341,8 +1320,6 @@ class PivotTableProcessor:
                     self.log_callback("Пустой файл", QColor("red"))
                     return None
 
-                # print(f"[Pivot] Заголовки: {headers}")
-
                 # Индексы
                 try:
                     row_indices = [
@@ -1352,7 +1329,6 @@ class PivotTableProcessor:
                         headers.index(col) for col in settings.get("columns", [])
                     ]
                     value_settings = settings.get("values", [])
-                    # print(f"[Pivot] Индексы: rows={row_indices}, cols={col_indices}")
                 except ValueError as e:
                     self.log_callback(f"Ошибка: колонка не найдена: {e}", QColor("red"))
                     return None
@@ -1362,7 +1338,6 @@ class PivotTableProcessor:
                 if filter_column and filter_column != "Не фильтровать":
                     try:
                         filter_idx = headers.index(filter_column)
-                        # print(f"[Pivot] Индекс фильтра: {filter_idx}")
                     except ValueError:
                         filter_idx = None
 
@@ -1384,7 +1359,6 @@ class PivotTableProcessor:
 
                 # Агрегация
                 pivot_data = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
-                processed_count = 0
                 duplicates_removed = 0
 
                 for row in reader:
@@ -1421,8 +1395,6 @@ class PivotTableProcessor:
                                 val_idx = headers.index(val_setting["field"])
                                 value = row[val_idx] if val_idx < len(row) else ""
 
-                                processed_count += 1
-
                                 if val_setting["aggregation"] == "Количество":
                                     pivot_data[row_key][col_key][
                                         f"{val_setting['field']}_{val_setting['aggregation']}"
@@ -1438,18 +1410,14 @@ class PivotTableProcessor:
                                             f"{val_setting['field']}_{val_setting['aggregation']}"
                                         ].append(0)
                             except Exception:
-                                # print(f"[Pivot] Ошибка обработки значения: {e}") # Слишком много шума
                                 continue
                     except Exception:
-                        # print(f"[Pivot] Ошибка обработки строки: {e}")
                         continue
 
-            # print(f"[Pivot] Обработано записей: {processed_count}")
             if remove_duplicates:
                 self.log_callback(
                     f"Удалено дубликатов: {duplicates_removed}", QColor("blue")
                 )
-            # print(f"[Pivot] Размер pivot_data: {len(pivot_data)}")
 
             # Агрегируем
             aggregated = {}

@@ -1011,7 +1011,6 @@ class CheckBoxListDelegate(QStyledItemDelegate):
         super().__init__(parent)
         self._is_dark = is_dark
         self._parent_widget = parent  # Сохраняем ссылку на родительский виджет
-        self._processing_click = False  # Флаг для предотвращения двойной обработки
 
     def set_theme(self, is_dark: bool):
         """Устанавливает тему."""
@@ -1169,7 +1168,6 @@ class ColumnValuesDialog(QDialog):
             self._is_dark = parent._is_dark_theme
 
         self._values = sorted(values) if values else []
-        self._loading = False
         self._file_paths = file_paths or []
         self._column = column
         self._filter_column = filter_column
@@ -1620,8 +1618,6 @@ class PivotSettingsDialog(QDialog):
         )
 
         # Отладка
-        # print(f"[Preview] Фильтр из: pivot_settings={pivot_settings is not None}")
-        # print(f"[Preview] Фильтр: колонка={filter_col_text}, значения={filter_values}")
 
         # Показываем диалог предпросмотра
         preview_dialog = PivotPreviewDialog(main_window, settings)
@@ -1733,7 +1729,6 @@ class PivotPreviewDialog(QDialog):
             return
 
         file_path = file_list.item(0).text()
-        # print(f"[Preview] Файл: {file_path}")
 
         try:
             # Создаём процессор
@@ -1743,29 +1738,9 @@ class PivotPreviewDialog(QDialog):
             filter_col = self._settings.get("filter_column", "")
             filter_vals = self._settings.get("filter_values", [])
 
-            # Отладка
-            # print(f"[Preview] Фильтр: колонка={filter_col}, значения={filter_vals}")
-            # print(f"[Preview] Настройки: {self._settings}")
-            # print(
-            #     f"[Preview] _filter_values в main_window: {getattr(main_window, '_filter_values', {})}"
-            # )
-            # print(
-            #     f"[Preview] filter_column_combo: {getattr(main_window, 'filter_column_combo', None)}"
-            # )
-            if hasattr(main_window, "filter_column_combo"):
-                pass
-                # print(
-                #     f"[Preview] Текущий фильтр в combo: {main_window.filter_column_combo.currentText()}"
-                # )
-
             self._pivot_data = processor.create_pivot_data(
                 file_path, self._settings, filter_col, filter_vals
             )
-
-            # print(f"[Preview] Данные получены: {self._pivot_data is not None}")
-            if self._pivot_data:
-                # print(f"[Preview] Размер данных: {len(self._pivot_data)} ключей")
-                pass
 
             if not self._pivot_data:
                 msgbox = QMessageBox(
@@ -2314,8 +2289,6 @@ class MainWindow(QMainWindow):
     delete_converted_file_requested = Signal()
     export_report_requested = Signal()
     settings_saved = Signal(dict)
-    files_processing_started = Signal(object)  # list of file paths
-    files_processing_finished = Signal(object)  # list of file paths
 
     def __init__(self):
         super().__init__()
@@ -2333,8 +2306,6 @@ class MainWindow(QMainWindow):
         self._pivot_settings: Optional[Dict[str, Any]] = None
 
         # Для обновления прогресса
-        self._progress_timer = QTimer()
-        self._progress_timer.timeout.connect(self._update_progress_display)
         self._current_progress_data = None
 
         # Лоадер загрузки
@@ -3082,12 +3053,6 @@ class MainWindow(QMainWindow):
             self.progress_elapsed_label.setText(progress_data.format_elapsed())
             self.progress_eta_label.setText(progress_data.format_eta())
             self.progress_speed_label.setText(progress_data.format_speed())
-
-    def _update_progress_display(self):
-        """Периодическое обновление отображения прогресса (для плавности)."""
-        if self._current_progress_data:
-            # Можно добавить дополнительную логику обновления если нужно
-            pass
 
     def reset_progress_details(self):
         """Сбрасывает панель детального прогресса."""

@@ -19,7 +19,7 @@ from gui import (
     TSVPreviewDialog,
     apply_theme_to_messagebox,
 )
-from converter import TSVToExcelConverter, FileUtilities, PivotTableProcessor
+from converter import TSVToExcelConverter, FileUtilities
 
 
 class TSVConverterApp:
@@ -38,12 +38,7 @@ class TSVConverterApp:
         # Конвертер
         self.converter: TSVToExcelConverter = None
 
-        # Процессор сводных таблиц
-        self.pivot_processor = PivotTableProcessor(self._log_message)
-
-        # Данные
-        self._header_color = QColor(200, 220, 240)
-        self._pivot_settings = None
+        # Таймер
         self._timer = QTimer()
         self._start_time = None
 
