@@ -2204,7 +2204,9 @@ class TSVPreviewDialog(QDialog):
         self._load_page_data()
         self._update_page_info()
 
-    def _row_matches_search(self, values: list, search_text: str, column_idx: int) -> bool:
+    def _row_matches_search(
+        self, values: list, search_text: str, column_idx: int
+    ) -> bool:
         """Проверяет, соответствует ли строка критерию поиска."""
         search_lower = search_text.lower()
         if column_idx >= 0 and column_idx < len(values):
@@ -2755,6 +2757,9 @@ class MainWindow(QMainWindow):
         self.file_list.clear()
         self.file_list.addItems(files)
 
+        # Обновляем состояние комбобоксов split/filter (блокируем при нескольких файлах)
+        self._update_split_filter_state()
+
         # Обновляем комбобоксы столбцов
         if headers:
             self._update_column_combos(headers)
@@ -2813,12 +2818,33 @@ class MainWindow(QMainWindow):
         # Сбрасываем worker
         self._file_worker = None
 
+    def _update_split_filter_state(self):
+        """Обновляет состояние комбобоксов split/filter в зависимости от количества файлов."""
+        file_count = self.file_list.count()
+        if file_count > 1:
+            self.split_column_combo.setEnabled(False)
+            self.filter_column_combo.setEnabled(False)
+            self.split_column_combo.setToolTip(
+                "Функция недоступна при загрузке нескольких файлов. "
+                "Split/filter работает только для одного файла."
+            )
+            self.filter_column_combo.setToolTip(
+                "Функция недоступна при загрузке нескольких файлов. "
+                "Split/filter работает только для одного файла."
+            )
+        else:
+            self.split_column_combo.setEnabled(True)
+            self.filter_column_combo.setEnabled(True)
+            self.split_column_combo.setToolTip("")
+            self.filter_column_combo.setToolTip("")
+
     def _remove_selected_file(self):
         """Удаление выбранного файла."""
         current_item = self.file_list.currentItem()
         if current_item:
             row = self.file_list.row(current_item)
             self.file_list.takeItem(row)
+            self._update_split_filter_state()
             self.log_message("Файл удалён из списка", QColor("orange"))
 
     def _preview_file(self):
