@@ -2447,6 +2447,9 @@ class MainWindow(QMainWindow):
         button_layout.addStretch()
         layout.addLayout(button_layout, stretch=1)
 
+        # Панель должна оставаться компактной, а не забирать лишнюю высоту окна.
+        widget.setMaximumHeight(widget.minimumSizeHint().height())
+
         return widget
 
     def _create_settings_panel(self) -> QWidget:
