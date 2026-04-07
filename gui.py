@@ -2278,9 +2278,7 @@ class MainWindow(QMainWindow):
     """
 
     # Сигналы для связи с бизнес-логикой
-    conversion_started = Signal(
-        list, str, str, bool, bool, dict, str, str, list, str, list
-    )
+    conversion_started = Signal()
     conversion_stopped = Signal()
     files_added = Signal(object)  # list of file paths
     preview_requested = Signal()
@@ -2901,23 +2899,6 @@ class MainWindow(QMainWindow):
             msgbox.exec()
             return
 
-        # Сбор параметров
-        files = [self.file_list.item(i).text() for i in range(self.file_list.count())]
-        output_dir = self.output_path_edit.text()
-        output_format = self.format_combo.currentText()
-
-        styles = {
-            "bold": self.bold_checkbox.isChecked(),
-            "italic": self.italic_checkbox.isChecked(),
-            "font_size": self.font_size_spinbox.value(),
-            "font_name": self.font_combo.currentFont().family(),
-            "border": 1 if self.border_checkbox.isChecked() else 0,
-        }
-
-        header_color = self._header_color.name()
-        split_column = self.split_column_combo.currentText()
-        filter_column = self.filter_column_combo.currentText()
-
         # Переключение состояния кнопок
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -2926,19 +2907,7 @@ class MainWindow(QMainWindow):
         self.log_message("Запуск конвертации...", QColor("blue"))
 
         # Сигнал для бизнес-логики
-        self.conversion_started.emit(
-            files,
-            output_dir,
-            output_format,
-            False,
-            False,
-            styles,
-            header_color,
-            split_column,
-            [],
-            filter_column,
-            [],
-        )
+        self.conversion_started.emit()
 
     def _stop_conversion(self):
         """Остановка конвертации."""

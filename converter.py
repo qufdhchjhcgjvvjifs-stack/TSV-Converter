@@ -1063,6 +1063,41 @@ class TSVToExcelConverter(QThread):
 
         self._cached_formats["cell"] = cell_format
 
+    def _process_rows_with_progress(
+        self,
+        reader,
+        filter_idx: Optional[int],
+        current_file: str,
+        row_handler,
+    ):
+        """Обрабатывает строки с фильтрацией, остановкой и обновлением прогресса."""
+        update_freq = max(1, self.total_rows // 100)
+
+        if filter_idx is not None and self.filter_values:
+            filter_vals = self.filter_values
+            for row_num, row in enumerate(reader, 1):
+                if row_num % 2000 == 0 and self.stop_flag:
+                    break
+
+                if filter_idx < len(row) and row[filter_idx] not in filter_vals:
+                    continue
+
+                row_handler(row)
+                self.processed_rows += 1
+                if self.processed_rows % update_freq == 0:
+                    self._emit_progress_update(current_file, "Запись данных...")
+        else:
+            for row_num, row in enumerate(reader, 1):
+                if row_num % 2000 == 0 and self.stop_flag:
+                    break
+
+                row_handler(row)
+                self.processed_rows += 1
+                if self.processed_rows % update_freq == 0:
+                    self._emit_progress_update(current_file, "Запись данных...")
+
+        self._emit_progress_update(current_file, "Запись данных...", force=True)
+
     def _convert_with_split(
         self,
         workbook: xlsxwriter.Workbook,
@@ -1080,7 +1115,6 @@ class TSVToExcelConverter(QThread):
 
         used_names: Set[str] = set()
         MAX_ROWS = 1000000
-        update_freq = max(1, self.total_rows // 100)
         selected_vals = self.selected_values
 
         # Вспомогательная функция для обработки одной строки
@@ -1147,32 +1181,7 @@ class TSVToExcelConverter(QThread):
                 )
                 sheet_row_counts[value] = current_row + 1
 
-        # Основной цикл с обновлением прогресса
-        if filter_idx is not None and self.filter_values:
-            filter_vals = self.filter_values
-            for row_num, row in enumerate(reader, 1):
-                if row_num % 2000 == 0 and self.stop_flag:
-                    break
-
-                if filter_idx < len(row) and row[filter_idx] not in filter_vals:
-                    continue
-
-                process_row(row)
-                self.processed_rows += 1
-                if self.processed_rows % update_freq == 0:
-                    self._emit_progress_update(current_file, "Запись данных...")
-        else:
-            for row_num, row in enumerate(reader, 1):
-                if row_num % 2000 == 0 and self.stop_flag:
-                    break
-
-                process_row(row)
-
-                self.processed_rows += 1
-                if self.processed_rows % update_freq == 0:
-                    self._emit_progress_update(current_file, "Запись данных...")
-
-        self._emit_progress_update(current_file, "Запись данных...", force=True)
+        self._process_rows_with_progress(reader, filter_idx, current_file, process_row)
 
     def _convert_without_split(
         self,
@@ -1189,7 +1198,6 @@ class TSVToExcelConverter(QThread):
 
         used_names: Set[str] = set()
         MAX_ROWS = 1000000
-        update_freq = max(1, self.total_rows // 100)
 
         # Вспомогательная функция для обработки
         def process_row(row):
@@ -1210,63 +1218,9 @@ class TSVToExcelConverter(QThread):
                 row_count = 1
 
             worksheet.write_row(row_count, 0, row, self._cached_formats["cell"])
-            # row_count += 1 # В Python nonlocal int immutable, нужно быть аккуратным, но += работает если переменная уже объявлена.
-            # Но стоп! nonlocal row_count += 1 сработает корректно.
+            row_count += 1
 
-        # Основной цикл с обновлением прогресса
-        if filter_idx is not None and self.filter_values:
-            filter_vals = self.filter_values
-            for row_num, row in enumerate(reader, 1):
-                if row_num % 2000 == 0 and self.stop_flag:
-                    break
-
-                if filter_idx < len(row) and row[filter_idx] not in filter_vals:
-                    continue
-
-                # Инлайн логика записи для скорости
-                if worksheet is None or row_count >= MAX_ROWS:
-                    sheet_name = FileUtilities.sanitize_sheet_name(
-                        "Все проекты" if sheet_num == 1 else f"Все проекты_{sheet_num}",
-                        used_names,
-                    )
-                    worksheet = workbook.add_worksheet(sheet_name)
-                    row_count = 0
-                    sheet_num += 1
-
-                    for col, header in enumerate(headers):
-                        worksheet.write(0, col, header, self._cached_formats["header"])
-                    row_count = 1
-
-                worksheet.write_row(row_count, 0, row, self._cached_formats["cell"])
-                row_count += 1
-                self.processed_rows += 1
-                if self.processed_rows % update_freq == 0:
-                    self._emit_progress_update(current_file, "Запись данных...")
-        else:
-            for row_num, row in enumerate(reader, 1):
-                if row_num % 2000 == 0 and self.stop_flag:
-                    break
-
-                if worksheet is None or row_count >= MAX_ROWS:
-                    sheet_name = FileUtilities.sanitize_sheet_name(
-                        "Все проекты" if sheet_num == 1 else f"Все проекты_{sheet_num}",
-                        used_names,
-                    )
-                    worksheet = workbook.add_worksheet(sheet_name)
-                    row_count = 0
-                    sheet_num += 1
-
-                    for col, header in enumerate(headers):
-                        worksheet.write(0, col, header, self._cached_formats["header"])
-                    row_count = 1
-
-                worksheet.write_row(row_count, 0, row, self._cached_formats["cell"])
-                row_count += 1
-                self.processed_rows += 1
-                if self.processed_rows % update_freq == 0:
-                    self._emit_progress_update(current_file, "Запись данных...")
-
-        self._emit_progress_update(current_file, "Запись данных...", force=True)
+        self._process_rows_with_progress(reader, filter_idx, current_file, process_row)
 
     def stop(self):
         """Останавливает конвертацию."""
@@ -1451,9 +1405,6 @@ class PivotTableProcessor:
         except Exception as e:
             self.log_callback(f"Ошибка создания сводной таблицы: {e}", QColor("red"))
             return None
-
-    # Метод _remove_duplicates больше не нужен, его логика встроена в основной цикл
-    # Можно удалить или оставить как заглушку, но лучше удалить.
 
     def write_pivot_table(
         self,

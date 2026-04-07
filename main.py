@@ -274,7 +274,7 @@ class TSVConverterApp:
                 self.window._pivot_settings["filter_column"] = ""
                 self.window._pivot_settings["filter_values"] = []
 
-    def _start_conversion(self, *args):
+    def _start_conversion(self):
         """Запускает конвертацию."""
         files = [
             self.window.file_list.item(i).text()
@@ -538,8 +538,6 @@ class TSVConverterApp:
 
     def _export_report(self):
         """Экспортирует отчёт в HTML."""
-        from PySide6.QtCore import QUrl
-        from PySide6.QtGui import QDesktopServices
         import html
 
         # Получаем данные из логов
