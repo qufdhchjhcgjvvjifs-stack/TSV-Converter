@@ -19,7 +19,7 @@ from gui import (
     TSVPreviewDialog,
     apply_theme_to_messagebox,
 )
-from converter import TSVToExcelConverter, FileUtilities
+from converter import TSVToExcelConverter, FileUtilities, ConversionConfig
 
 
 class TSVConverterApp:
@@ -274,52 +274,22 @@ class TSVConverterApp:
                 self.window._pivot_settings["filter_column"] = ""
                 self.window._pivot_settings["filter_values"] = []
 
-    def _start_conversion(self):
+    def _start_conversion(self, config: ConversionConfig):
         """Запускает конвертацию."""
-        files = [
-            self.window.file_list.item(i).text()
-            for i in range(self.window.file_list.count())
-        ]
-        output_dir = self.window.output_path_edit.text()
-        output_format = self.window.format_combo.currentText()
-
-        styles = {
-            "bold": self.window.bold_checkbox.isChecked(),
-            "italic": self.window.italic_checkbox.isChecked(),
-            "font_size": self.window.font_size_spinbox.value(),
-            "font_name": self.window.font_combo.currentFont().family(),
-            "border": 1 if self.window.border_checkbox.isChecked() else 0,
-        }
-
-        header_color = self.window._header_color.name()
-        split_column = self.window.split_column_combo.currentText()
-        filter_column = self.window.filter_column_combo.currentText()
-
-        selected_values = (
-            self.window._selected_column_values.get(split_column, [])
-            if split_column != "Не разделять"
-            else []
-        )
-        filter_values = (
-            self.window._filter_values.get(filter_column, [])
-            if filter_column != "Не фильтровать"
-            else []
-        )
-
         # Создаём конвертер
         self.converter = TSVToExcelConverter(
-            input_files=files,
-            output_directory=output_dir,
-            output_format=output_format,
-            auto_open=self.window._settings.get("auto_open", False),
-            auto_delete=self.window._settings.get("auto_delete", False),
-            styles=styles,
-            header_color=header_color,
-            split_column=split_column,
-            selected_values=selected_values,
-            filter_column=filter_column,
-            filter_values=filter_values,
-            pivot_settings=self.window._pivot_settings,
+            input_files=config.input_files,
+            output_directory=config.output_directory,
+            output_format=config.output_format,
+            auto_open=config.auto_open,
+            auto_delete=config.auto_delete,
+            styles=config.styles,
+            header_color=config.header_color,
+            split_column=config.split_column,
+            selected_values=config.selected_values,
+            filter_column=config.filter_column,
+            filter_values=config.filter_values,
+            pivot_settings=config.pivot_settings,
         )
 
         # Подключаем сигналы

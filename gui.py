@@ -64,7 +64,7 @@ from datetime import datetime
 from typing import Optional, Dict, List, Set, Any
 
 # Импортируем утилиты из converter.py
-from converter import FileUtilities
+from converter import FileUtilities, ConversionConfig
 
 
 # ============================================================================
@@ -2278,7 +2278,7 @@ class MainWindow(QMainWindow):
     """
 
     # Сигналы для связи с бизнес-логикой
-    conversion_started = Signal()
+    conversion_started = Signal(object)  # ConversionConfig
     conversion_stopped = Signal()
     files_added = Signal(object)  # list of file paths
     preview_requested = Signal()
@@ -2906,8 +2906,51 @@ class MainWindow(QMainWindow):
 
         self.log_message("Запуск конвертации...", QColor("blue"))
 
+        # Собираем параметры в конфигурацию
+        files = [
+            self.file_list.item(i).text()
+            for i in range(self.file_list.count())
+        ]
+        
+        styles = {
+            "bold": self.bold_checkbox.isChecked(),
+            "italic": self.italic_checkbox.isChecked(),
+            "font_size": self.font_size_spinbox.value(),
+            "font_name": self.font_combo.currentFont().family(),
+            "border": 1 if self.border_checkbox.isChecked() else 0,
+        }
+
+        split_column = self.split_column_combo.currentText()
+        filter_column = self.filter_column_combo.currentText()
+
+        selected_values = (
+            self._selected_column_values.get(split_column, [])
+            if split_column != "Не разделять"
+            else []
+        )
+        filter_values = (
+            self._filter_values.get(filter_column, [])
+            if filter_column != "Не фильтровать"
+            else []
+        )
+
+        config = ConversionConfig(
+            input_files=files,
+            output_directory=self.output_path_edit.text(),
+            output_format=self.format_combo.currentText(),
+            auto_open=self._settings.get("auto_open", False),
+            auto_delete=self._settings.get("auto_delete", False),
+            styles=styles,
+            header_color=self._header_color.name(),
+            split_column=split_column,
+            selected_values=selected_values,
+            filter_column=filter_column,
+            filter_values=filter_values,
+            pivot_settings=self._pivot_settings,
+        )
+
         # Сигнал для бизнес-логики
-        self.conversion_started.emit()
+        self.conversion_started.emit(config)
 
     def _stop_conversion(self):
         """Остановка конвертации."""

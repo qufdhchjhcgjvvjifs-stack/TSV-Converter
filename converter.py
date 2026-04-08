@@ -22,6 +22,24 @@ import xlsxwriter
 
 
 @dataclass
+class ConversionConfig:
+    """Конфигурация конвертации, собираемая из GUI."""
+
+    input_files: List[str]
+    output_directory: str
+    output_format: str
+    auto_open: bool
+    auto_delete: bool
+    styles: Dict[str, Any]
+    header_color: str
+    split_column: str
+    selected_values: List[str]
+    filter_column: str
+    filter_values: List[str]
+    pivot_settings: Dict[str, Any]
+
+
+@dataclass
 class ProgressData:
     """
     Структура данных для расширенной информации о прогрессе.
