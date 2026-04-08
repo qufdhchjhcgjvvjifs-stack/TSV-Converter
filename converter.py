@@ -198,11 +198,6 @@ class ProgressTracker:
             self.total_rows = new_total
 
 
-# ============================================================================
-# УТИЛИТЫ (продолжение)
-# ============================================================================
-
-
 class FileUtilities:
     """
     Утилиты для работы с файлами.
@@ -742,16 +737,13 @@ class TSVToExcelConverter(QThread):
         self.output_file_path = output_path
 
     def _write_split_csv(self, reader, headers, base_name, split_idx, filter_idx):
-        # Для сплита приходится держать открытые файлы или собирать буфер
-        # Чтобы не превышать лимит ОС на количество открытых файлов (часто 512-1024),
-        # мы используем LRU кэш для файлов.
 
         MAX_OPEN_FILES = 200
         open_files = {}
         writers = {}
         used_file_names: Set[str] = set()
-        file_paths: Dict[str, str] = {}  # key -> file path
-        selected_vals = self.selected_values  # Локальная ссылка
+        file_paths: Dict[str, str] = {}
+        selected_vals = self.selected_values
         current_file = f"{base_name}_*.csv"
         update_freq = max(1, self.total_rows // 100)
 
@@ -862,8 +854,6 @@ class TSVToExcelConverter(QThread):
             writers[key] = writer
         else:
             # Обновляем позицию ключа в словарях для LRU
-            # В Python 3.7+ словари сохраняют порядок добавления.
-            # Передобавление ключа перемещает его в конец (самый "свежий").
             f = open_files.pop(key)
             writer = writers.pop(key)
             open_files[key] = f
@@ -1364,8 +1354,11 @@ class PivotTableProcessor:
                         except ValueError:
                             pass
 
-                # Агрегация
-                pivot_data = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+                # Агрегация (Online Aggregation)
+                def get_default_agg_state():
+                    return {"sum": 0.0, "count": 0, "max": float("-inf"), "min": float("inf")}
+
+                pivot_data = defaultdict(lambda: defaultdict(lambda: defaultdict(get_default_agg_state)))
                 duplicates_removed = 0
 
                 for row in reader:
@@ -1401,21 +1394,24 @@ class PivotTableProcessor:
                             try:
                                 val_idx = headers.index(val_setting["field"])
                                 value = row[val_idx] if val_idx < len(row) else ""
+                                key = f"{val_setting['field']}_{val_setting['aggregation']}"
+                                
+                                state = pivot_data[row_key][col_key][key]
 
                                 if val_setting["aggregation"] == "Количество":
-                                    pivot_data[row_key][col_key][
-                                        f"{val_setting['field']}_{val_setting['aggregation']}"
-                                    ].append(1)
+                                    state["count"] += 1
                                 else:
                                     try:
-                                        num_value = float(value) if value else 0
-                                        pivot_data[row_key][col_key][
-                                            f"{val_setting['field']}_{val_setting['aggregation']}"
-                                        ].append(num_value)
+                                        num_value = float(value) if value else 0.0
                                     except (ValueError, AttributeError):
-                                        pivot_data[row_key][col_key][
-                                            f"{val_setting['field']}_{val_setting['aggregation']}"
-                                        ].append(0)
+                                        num_value = 0.0
+                                    
+                                    state["sum"] += num_value
+                                    state["count"] += 1
+                                    if num_value > state["max"]:
+                                        state["max"] = num_value
+                                    if num_value < state["min"]:
+                                        state["min"] = num_value
                             except Exception:
                                 continue
                     except Exception:
@@ -1426,7 +1422,7 @@ class PivotTableProcessor:
                     f"Удалено дубликатов: {duplicates_removed}", QColor("blue")
                 )
 
-            # Агрегируем
+            # Агрегируем (вычисляем финальные значения)
             aggregated = {}
             for row_key in pivot_data:
                 aggregated[row_key] = {}
@@ -1435,21 +1431,19 @@ class PivotTableProcessor:
 
                     for val_setting in value_settings:
                         key = f"{val_setting['field']}_{val_setting['aggregation']}"
-                        values = pivot_data[row_key][col_key][key]
+                        state = pivot_data[row_key][col_key][key]
 
-                        if values:
+                        if state["count"] > 0:
                             if val_setting["aggregation"] == "Сумма":
-                                aggregated[row_key][col_key][key] = sum(values)
+                                aggregated[row_key][col_key][key] = state["sum"]
                             elif val_setting["aggregation"] == "Среднее":
-                                aggregated[row_key][col_key][key] = sum(values) / len(
-                                    values
-                                )
+                                aggregated[row_key][col_key][key] = state["sum"] / state["count"]
                             elif val_setting["aggregation"] == "Количество":
-                                aggregated[row_key][col_key][key] = len(values)
+                                aggregated[row_key][col_key][key] = state["count"]
                             elif val_setting["aggregation"] == "Максимум":
-                                aggregated[row_key][col_key][key] = max(values)
+                                aggregated[row_key][col_key][key] = state["max"]
                             elif val_setting["aggregation"] == "Минимум":
-                                aggregated[row_key][col_key][key] = min(values)
+                                aggregated[row_key][col_key][key] = state["min"]
                         else:
                             aggregated[row_key][col_key][key] = 0
 

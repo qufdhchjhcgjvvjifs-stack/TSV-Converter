@@ -754,7 +754,6 @@ class LoadingWorker(QThread):
 
     finished = Signal(object)  # Результат обработки
     error = Signal(str)  # Ошибка
-    progress = Signal(int, str)  # Прогресс (шаг, текст)
 
     def __init__(self, operation_callable, *args, **kwargs):
         super().__init__()

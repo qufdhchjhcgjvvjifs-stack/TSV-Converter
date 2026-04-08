@@ -18,6 +18,7 @@ from gui import (
     PivotSettingsDialog,
     TSVPreviewDialog,
     apply_theme_to_messagebox,
+    LoadingWorker,
 )
 from converter import TSVToExcelConverter, FileUtilities, ConversionConfig
 
@@ -41,6 +42,9 @@ class TSVConverterApp:
         # Таймер
         self._timer = QTimer()
         self._start_time = None
+        
+        # Воркеры подсчета строк (чтобы сборщик мусора не убил активный поток)
+        self._active_workers = []
 
         # Загрузка настроек
         self._load_settings()
@@ -64,7 +68,6 @@ class TSVConverterApp:
         self.window.export_report_requested.connect(self._export_report)
         self.window.preview_requested.connect(self._preview_file)
         self.window.pivot_settings_requested.connect(self._show_pivot_settings)
-        # Кнопка настроек уже подключена в MainWindow._show_settings
 
         # Сигналы
         self.window.settings_saved.connect(self._on_settings_saved)
@@ -78,7 +81,6 @@ class TSVConverterApp:
         )
 
         # Конвертер
-        # (будет подключено при создании)
 
     def _load_settings(self):
         """Загружает сохранённые настройки."""
@@ -126,40 +128,70 @@ class TSVConverterApp:
             )
 
     def _update_total_rows(self):
-        """Подсчитывает общее количество строк."""
+        """Подсчитывает общее количество строк (асинхронно)."""
+        files = [
+            self.window.file_list.item(i).text()
+            for i in range(self.window.file_list.count())
+        ]
+        
+        if not files:
+            self.window.total_rows_label.setText("Строк: 0")
+            return
+            
+        filter_col = self.window.filter_column_combo.currentText()
+        filter_values = dict(self.window._filter_values)
+        
+        # Обновляем UI
+        self.window.total_rows_label.setText("Строк: Подсчет...")
+        
+        # Запускаем в отдельном потоке
+        worker = LoadingWorker(
+            self._count_rows_task, files, filter_col, filter_values
+        )
+        worker.finished.connect(
+            lambda total: self.window.total_rows_label.setText(f"Строк: {total}")
+        )
+        worker.error.connect(
+            lambda err: self._log_message(f"Ошибка подсчёта строк: {err}", QColor("red"))
+        )
+        
+        # Сначала очищаем завершенные потоки
+        self._active_workers = [w for w in self._active_workers if w.isRunning()]
+        # Затем сохраняем ссылку на новый, чтобы избежать "QThread: Destroyed"
+        self._active_workers.append(worker)
+        
+        worker.start()
+
+    @staticmethod
+    def _count_rows_task(files, filter_col, filter_values):
+        """Фоновая задача подсчета строк."""
         total = 0
-
-        for i in range(self.window.file_list.count()):
-            file_path = self.window.file_list.item(i).text()
-
+        for file_path in files:
             try:
                 encoding = FileUtilities.get_encoding(file_path)
                 delimiter = FileUtilities.get_delimiter(file_path)
 
-                # Индекс фильтра
                 filter_idx = None
                 filter_vals = None
 
-                filter_col = self.window.filter_column_combo.currentText()
                 if filter_col and filter_col != "Не фильтровать":
                     with open(file_path, "r", encoding=encoding, errors="replace") as f:
                         reader = csv.reader(f, delimiter=delimiter)
                         headers = next(reader)
                         try:
                             filter_idx = headers.index(filter_col)
-                            filter_vals = set(
-                                self.window._filter_values.get(filter_col, [])
-                            )
+                            filter_vals = set(filter_values.get(filter_col, []))
                         except ValueError:
                             filter_idx = None
 
-                total += FileUtilities.count_rows(
+                count = FileUtilities.count_rows(
                     file_path, delimiter, encoding, filter_idx, filter_vals
                 )
-            except (OSError, IOError, UnicodeDecodeError) as e:
-                self._log_message(f"Ошибка подсчёта строк: {e}", QColor("red"))
-
-        self.window.total_rows_label.setText(f"Строк: {total}")
+                if count > 0:
+                    total += count
+            except (OSError, IOError, UnicodeDecodeError):
+                pass
+        return total
 
     def _on_split_column_selected(self, index: int):
         """Обработчик выбора столбца для разделения."""
@@ -633,8 +665,6 @@ def main():
     app.setApplicationName("TSV Converter")
     app.setOrganizationName("TSV Converter")
 
-    # Устанавливаем стиль Fusion для кроссплатформенной консистентности
-    # и лучшего контроля над палитрой цветов
     app.setStyle(QStyleFactory.create("Fusion"))
 
     # Запуск приложения
