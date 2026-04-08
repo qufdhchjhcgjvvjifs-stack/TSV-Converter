@@ -405,6 +405,10 @@ class TSVToExcelConverter(QThread):
     stopped_signal = Signal()
     error = Signal(str)
 
+    # Архитектурные константы
+    MAX_EXCEL_ROWS = 1000000  # Ограничение в 1млн строк на один лист Excel
+    STOP_CHECK_INTERVAL = 2000  # Как часто (в строках) проверять флаг остановки конвертации
+
     def __init__(
         self,
         input_files: List[str],
@@ -554,13 +558,13 @@ class TSVToExcelConverter(QThread):
                     if filter_idx is not None and self.filter_values:
                         filter_vals = self.filter_values  # Локальная ссылка быстрее
                         for i, row in enumerate(reader):
-                            if i % 2000 == 0 and self.stop_flag:
+                            if i % self.STOP_CHECK_INTERVAL == 0 and self.stop_flag:
                                 return
                             if filter_idx < len(row) and row[filter_idx] in filter_vals:
                                 self.total_rows += 1
                     else:
                         for i, _ in enumerate(reader):
-                            if i % 2000 == 0 and self.stop_flag:
+                            if i % self.STOP_CHECK_INTERVAL == 0 and self.stop_flag:
                                 return
                             self.total_rows += 1
 
@@ -1076,7 +1080,7 @@ class TSVToExcelConverter(QThread):
         if filter_idx is not None and self.filter_values:
             filter_vals = self.filter_values
             for row_num, row in enumerate(reader, 1):
-                if row_num % 2000 == 0 and self.stop_flag:
+                if row_num % self.STOP_CHECK_INTERVAL == 0 and self.stop_flag:
                     break
 
                 if filter_idx < len(row) and row[filter_idx] not in filter_vals:
@@ -1088,7 +1092,7 @@ class TSVToExcelConverter(QThread):
                     self._emit_progress_update(current_file, "Запись данных...")
         else:
             for row_num, row in enumerate(reader, 1):
-                if row_num % 2000 == 0 and self.stop_flag:
+                if row_num % self.STOP_CHECK_INTERVAL == 0 and self.stop_flag:
                     break
 
                 row_handler(row)
@@ -1114,7 +1118,7 @@ class TSVToExcelConverter(QThread):
         others_row_count = 0
 
         used_names: Set[str] = set()
-        MAX_ROWS = 1000000
+        MAX_ROWS = self.MAX_EXCEL_ROWS
         selected_vals = self.selected_values
 
         # Вспомогательная функция для обработки одной строки
@@ -1197,7 +1201,7 @@ class TSVToExcelConverter(QThread):
         sheet_num = 1
 
         used_names: Set[str] = set()
-        MAX_ROWS = 1000000
+        MAX_ROWS = self.MAX_EXCEL_ROWS
 
         # Вспомогательная функция для обработки
         def process_row(row):
