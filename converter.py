@@ -743,13 +743,14 @@ class TSVToExcelConverter(QThread):
 
     def _write_split_csv(self, reader, headers, base_name, split_idx, filter_idx):
         # Для сплита приходится держать открытые файлы или собирать буфер
-        # Чтобы не держать тысячи файлов, будем собирать в словаре списков (осторожно с памятью!)
-        # Или, лучше, проход в один поток, но открытие/закрытие (медленно).
-        # Оптимально: словарь открытых хэндлов (до лимита ОС).
+        # Чтобы не превышать лимит ОС на количество открытых файлов (часто 512-1024),
+        # мы используем LRU кэш для файлов.
 
+        MAX_OPEN_FILES = 200
         open_files = {}
         writers = {}
         used_file_names: Set[str] = set()
+        file_paths: Dict[str, str] = {}  # key -> file path
         selected_vals = self.selected_values  # Локальная ссылка
         current_file = f"{base_name}_*.csv"
         update_freq = max(1, self.total_rows // 100)
@@ -759,7 +760,7 @@ class TSVToExcelConverter(QThread):
             if filter_idx is not None and self.filter_values:
                 filter_vals = self.filter_values
                 for i, row in enumerate(reader):
-                    if i % 2000 == 0 and self.stop_flag:
+                    if i % self.STOP_CHECK_INTERVAL == 0 and self.stop_flag:
                         break
 
                     if filter_idx < len(row) and row[filter_idx] not in filter_vals:
@@ -774,6 +775,8 @@ class TSVToExcelConverter(QThread):
                         open_files,
                         writers,
                         used_file_names,
+                        file_paths,
+                        MAX_OPEN_FILES,
                     )
                     self.processed_rows += 1
                     if self.processed_rows % update_freq == 0:
@@ -782,7 +785,7 @@ class TSVToExcelConverter(QThread):
                         )
             else:
                 for i, row in enumerate(reader):
-                    if i % 2000 == 0 and self.stop_flag:
+                    if i % self.STOP_CHECK_INTERVAL == 0 and self.stop_flag:
                         break
 
                     self._process_split_row(
@@ -794,6 +797,8 @@ class TSVToExcelConverter(QThread):
                         open_files,
                         writers,
                         used_file_names,
+                        file_paths,
+                        MAX_OPEN_FILES,
                     )
                     self.processed_rows += 1
                     if self.processed_rows % update_freq == 0:
@@ -820,21 +825,47 @@ class TSVToExcelConverter(QThread):
         open_files,
         writers,
         used_file_names,
+        file_paths,
+        max_open_files,
     ):
-        """Вспомогательный метод для записи строки в нужный файл."""
+        """Вспомогательный метод для записи строки в нужный файл с LRU кэшированием."""
         key = row[split_idx] if split_idx < len(row) else "Unknown"
         if selected_vals and key not in selected_vals:
             key = "Остальные"
 
-        # Санитизация имени файла (только если новый ключ)
         if key not in writers:
-            safe_key = FileUtilities.sanitize_file_stem(key, used_file_names)
-            file_path = os.path.join(
-                self.output_directory, f"{base_name}_{safe_key}.csv"
-            )
-            f = open(file_path, "w", encoding="utf-8-sig", newline="")
-            writer = csv.writer(f, delimiter=";")
-            writer.writerow(headers)
+            # Если достигли лимита открытых файлов, закрываем самый старый (LRU)
+            if len(open_files) >= max_open_files:
+                oldest_key = next(iter(open_files))
+                open_files[oldest_key].close()
+                del open_files[oldest_key]
+                del writers[oldest_key]
+
+            if key not in file_paths:
+                # Файл создаётся впервые
+                safe_key = FileUtilities.sanitize_file_stem(key, used_file_names)
+                file_path = os.path.join(
+                    self.output_directory, f"{base_name}_{safe_key}.csv"
+                )
+                file_paths[key] = file_path
+                
+                f = open(file_path, "w", encoding="utf-8-sig", newline="")
+                writer = csv.writer(f, delimiter=";")
+                writer.writerow(headers)
+            else:
+                # Файл уже был создан, открываем на дозапись
+                file_path = file_paths[key]
+                f = open(file_path, "a", encoding="utf-8-sig", newline="")
+                writer = csv.writer(f, delimiter=";")
+
+            open_files[key] = f
+            writers[key] = writer
+        else:
+            # Обновляем позицию ключа в словарях для LRU
+            # В Python 3.7+ словари сохраняют порядок добавления.
+            # Передобавление ключа перемещает его в конец (самый "свежий").
+            f = open_files.pop(key)
+            writer = writers.pop(key)
             open_files[key] = f
             writers[key] = writer
 
