@@ -2006,7 +2006,6 @@ class TSVPreviewDialog(QDialog):
         self._delimiter = "\t"
 
         self._active_search_text = ""
-        self._active_search_column = -1
         self._search_match_positions = []
 
         self._init_ui()
@@ -2231,7 +2230,7 @@ class TSVPreviewDialog(QDialog):
                 column_idx = -1
 
         self._active_search_text = search_text
-        self._active_search_column = column_idx
+
         self._search_match_positions = []
 
         try:
@@ -2304,7 +2303,7 @@ class MainWindow(QMainWindow):
         self._pivot_settings: Optional[Dict[str, Any]] = None
 
         # Для обновления прогресса
-        self._current_progress_data = None
+
 
         # Лоадер загрузки
         self._loading_overlay = None
@@ -3052,9 +3051,6 @@ class MainWindow(QMainWindow):
         if not isinstance(progress_data, ProgressData):
             return
 
-        # Сохраняем текущие данные
-        self._current_progress_data = progress_data
-
         # Показываем панель прогресса
         if hasattr(self, "progress_details_widget"):
             self.progress_details_widget.setVisible(True)
@@ -3079,7 +3075,7 @@ class MainWindow(QMainWindow):
             self.progress_elapsed_label.setText("00:00")
             self.progress_eta_label.setText("--:--")
             self.progress_speed_label.setText("0 строк/сек")
-        self._current_progress_data = None
+
 
 
 # ============================================================================
