@@ -6,6 +6,7 @@
 import os
 import csv
 import time
+from datetime import datetime
 from typing import List, Dict, Any, Optional, Set
 from collections import defaultdict
 from dataclasses import dataclass
@@ -418,6 +419,16 @@ class TSVToExcelConverter(QThread):
     stopped_signal = Signal()
     error = Signal(str)
 
+    @staticmethod
+    def _build_output_base_name(input_file: str, file_index: int = 0) -> str:
+        """Формирует базовое имя выходного файла от исходного имени и текущего времени."""
+        source_name = os.path.splitext(os.path.basename(input_file))[0]
+        if file_index > 0:
+            source_name = f"{source_name}_{file_index + 1}"
+
+        timestamp = datetime.now().strftime("%H.%M.%S")
+        return f"{source_name} (conver_{timestamp})"
+
     # Архитектурные константы
     MAX_EXCEL_ROWS = 1000000  # Ограничение в 1млн строк на один лист Excel
     STOP_CHECK_INTERVAL = 2000  # Как часто (в строках) проверять флаг остановки конвертации
@@ -651,9 +662,7 @@ class TSVToExcelConverter(QThread):
         file_index: int = 0,
     ) -> str:
         """Конвертация в CSV."""
-        base_name = os.path.splitext(os.path.basename(input_file))[0]
-        if file_index > 0:
-            base_name = f"{base_name}_{file_index + 1}"
+        base_name = self._build_output_base_name(input_file, file_index)
 
         with open(input_file, "r", encoding=encoding, errors="replace") as f:
             reader = csv.reader(f, delimiter=delimiter)
@@ -914,9 +923,7 @@ class TSVToExcelConverter(QThread):
     ) -> str:
         """Стандартная конвертация в XLSX (перенесенная логика)."""
         # Имя выходного файла
-        base_name = os.path.splitext(os.path.basename(input_file))[0]
-        if file_index > 0:
-            base_name = f"{base_name}_{file_index + 1}"
+        base_name = self._build_output_base_name(input_file, file_index)
         output_path = os.path.join(self.output_directory, f"{base_name}.xlsx")
 
         workbook = None
