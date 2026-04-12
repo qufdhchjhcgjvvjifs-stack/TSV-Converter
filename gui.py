@@ -677,9 +677,7 @@ class LoadingOverlay(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         # Получаем тему от родителя
-        is_dark = False
-        if self.parent() and hasattr(self.parent(), "_is_dark_theme"):
-            is_dark = self.parent()._is_dark_theme
+        is_dark = get_widget_theme_flag(self.parent()) if self.parent() else False
 
         # Цвета в зависимости от темы (полупрозрачный фон alpha=150 для видимости GUI)
         if is_dark:
@@ -709,9 +707,10 @@ class LoadingOverlay(QWidget):
         font.setPointSize(12)
         font.setBold(True)
         painter.setFont(font)
+        text_width = min(max(self.width() - 80, 240), 520)
         painter.drawText(
-            QRect(center_x - 100, center_y + 60, 200, 30),
-            Qt.AlignmentFlag.AlignCenter,
+            QRect(center_x - text_width // 2, center_y + 60, text_width, 50),
+            Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
             self._text,
         )
 
@@ -1663,10 +1662,19 @@ class PivotPreviewDialog(QDialog):
 
         self._settings = settings
         self._pivot_data = None
+        self._worker = None
+        self._loading_started = False
 
         self._init_ui()
         apply_theme_to_dialog(self, self._is_dark)
-        self._load_preview()
+        self._loading_overlay = LoadingOverlay(self, "Формирование предпросмотра...")
+
+    def showEvent(self, event):
+        """Запускает загрузку после первого показа диалога."""
+        super().showEvent(event)
+        if not self._loading_started:
+            self._loading_started = True
+            self._load_preview_async()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -1675,30 +1683,31 @@ class PivotPreviewDialog(QDialog):
 
         # Таблица
         self.table_widget = QTableWidget()
+        self.table_widget.setEnabled(False)
         layout.addWidget(self.table_widget)
 
         # Кнопки
         button_layout = QHBoxLayout()
         button_layout.addStretch()
 
-        export_btn = SecondaryButton("📊 Экспорт в Excel")
-        export_btn.clicked.connect(self._export_to_excel)
-        button_layout.addWidget(export_btn)
+        self.export_btn = SecondaryButton("📊 Экспорт в Excel")
+        self.export_btn.setEnabled(False)
+        self.export_btn.clicked.connect(self._export_to_excel)
+        button_layout.addWidget(self.export_btn)
 
-        copy_btn = SecondaryButton("Копировать")
-        copy_btn.clicked.connect(self._copy_to_clipboard)
-        button_layout.addWidget(copy_btn)
+        self.copy_btn = SecondaryButton("Копировать")
+        self.copy_btn.setEnabled(False)
+        self.copy_btn.clicked.connect(self._copy_to_clipboard)
+        button_layout.addWidget(self.copy_btn)
 
-        close_btn = PrimaryButton("Закрыть")
-        close_btn.clicked.connect(self.accept)
-        button_layout.addWidget(close_btn)
+        self.close_btn = PrimaryButton("Закрыть")
+        self.close_btn.clicked.connect(self.accept)
+        button_layout.addWidget(self.close_btn)
 
         layout.addLayout(button_layout)
 
-    def _load_preview(self):
-        """Загружает данные для предпросмотра."""
-        from converter import PivotTableProcessor
-
+    def _resolve_preview_file_path(self) -> Optional[str]:
+        """Возвращает путь к файлу для построения предпросмотра."""
         # Получаем главное окно (родитель)
         main_window = self.parent()
         if not main_window:
@@ -1711,7 +1720,7 @@ class PivotPreviewDialog(QDialog):
             )
             apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
             msgbox.exec()
-            return
+            return None
 
         # Получаем первый файл из списка
         file_list = main_window.file_list if hasattr(main_window, "file_list") else None
@@ -1725,49 +1734,119 @@ class PivotPreviewDialog(QDialog):
             )
             apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
             msgbox.exec()
+            return None
+
+        return file_list.item(0).text()
+
+    def _load_preview_async(self):
+        """Запускает асинхронную загрузку данных для предпросмотра."""
+        file_path = self._resolve_preview_file_path()
+        if not file_path:
+            self.reject()
             return
 
-        file_path = file_list.item(0).text()
+        self._show_loading()
+        self._worker = LoadingWorker(
+            self._build_pivot_preview_data, file_path, dict(self._settings)
+        )
+        self._worker.finished.connect(self._on_preview_loaded)
+        self._worker.error.connect(self._on_preview_error)
+        self._worker.start()
+
+    @staticmethod
+    def _build_pivot_preview_data(file_path: str, settings: Dict[str, Any]):
+        """Строит данные сводной таблицы в фоне."""
+        from converter import PivotTableProcessor
+        import traceback
 
         try:
-            # Создаём процессор
             processor = PivotTableProcessor(lambda _msg, _color: None)
-
-            # Получаем данные фильтра из настроек
-            filter_col = self._settings.get("filter_column", "")
-            filter_vals = self._settings.get("filter_values", [])
-
-            self._pivot_data = processor.create_pivot_data(
-                file_path, self._settings, filter_col, filter_vals
+            filter_col = settings.get("filter_column", "")
+            filter_vals = settings.get("filter_values", [])
+            return processor.create_pivot_data(
+                file_path, settings, filter_col, filter_vals
             )
-
-            if not self._pivot_data:
-                msgbox = QMessageBox(
-                    QMessageBox.Icon.Warning,
-                    "Предупреждение",
-                    "Нет данных для отображения\n\nПроверьте:\n1. Выбраны ли поля для строк/столбцов\n2. Добавлены ли значения для агрегации\n3. Корректность настроек",
-                    QMessageBox.StandardButton.Ok,
-                    self,
-                )
-                apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
-                msgbox.exec()
-                return
-
-            # Заполняем таблицу
-            self._fill_table()
-
         except Exception as e:
-            import traceback
+            raise RuntimeError(
+                f"Ошибка при загрузке данных:\n{str(e)}\n\n{traceback.format_exc()}"
+            ) from e
 
+    @Slot(object)
+    def _on_preview_loaded(self, pivot_data):
+        """Обработчик успешной загрузки предпросмотра."""
+        self._pivot_data = pivot_data
+        self._hide_loading()
+        if self._worker:
+            self._worker.deleteLater()
+            self._worker = None
+
+        if not self._pivot_data:
             msgbox = QMessageBox(
-                QMessageBox.Icon.Critical,
-                "Ошибка",
-                f"Ошибка при загрузке данных:\n{str(e)}\n\n{traceback.format_exc()}",
+                QMessageBox.Icon.Warning,
+                "Предупреждение",
+                "Нет данных для отображения\n\nПроверьте:\n1. Выбраны ли поля для строк/столбцов\n2. Добавлены ли значения для агрегации\n3. Корректность настроек",
                 QMessageBox.StandardButton.Ok,
                 self,
             )
             apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
             msgbox.exec()
+            return
+
+        self._fill_table()
+        self.copy_btn.setEnabled(True)
+        self.export_btn.setEnabled(True)
+
+    @Slot(str)
+    def _on_preview_error(self, error: str):
+        """Обработчик ошибки загрузки предпросмотра."""
+        self._hide_loading()
+        if self._worker:
+            self._worker.deleteLater()
+            self._worker = None
+
+        msgbox = QMessageBox(
+            QMessageBox.Icon.Critical,
+            "Ошибка",
+            error,
+            QMessageBox.StandardButton.Ok,
+            self,
+        )
+        apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
+        msgbox.exec()
+
+    def _show_loading(self):
+        """Показывает лоадер во время построения предпросмотра."""
+        self._loading_overlay.resize(self.size())
+        self._loading_overlay.start_animation()
+        self.table_widget.setEnabled(False)
+        self.copy_btn.setEnabled(False)
+        self.export_btn.setEnabled(False)
+        self.close_btn.setEnabled(False)
+
+    def _hide_loading(self):
+        """Скрывает лоадер после завершения построения предпросмотра."""
+        self._loading_overlay.stop_animation()
+        self.table_widget.setEnabled(bool(self._pivot_data))
+        self.close_btn.setEnabled(True)
+
+    def reject(self):
+        """Блокирует закрытие диалога, пока строится предпросмотр."""
+        if self._worker and self._worker.isRunning():
+            return
+        super().reject()
+
+    def closeEvent(self, event):
+        """Блокирует закрытие окна, пока работает фоновая загрузка."""
+        if self._worker and self._worker.isRunning():
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def resizeEvent(self, event):
+        """Обновляет размер лоадера при изменении размера диалога."""
+        super().resizeEvent(event)
+        if hasattr(self, "_loading_overlay"):
+            self._loading_overlay.resize(self.size())
 
     def _fill_table(self):
         """Заполняет таблицу данными."""
