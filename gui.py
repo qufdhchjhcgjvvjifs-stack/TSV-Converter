@@ -2085,11 +2085,19 @@ class TSVPreviewDialog(QDialog):
 
         self._active_search_text = ""
         self._search_match_positions = []
+        self._worker = None
+        self._loading_started = False
 
         self._init_ui()
         apply_theme_to_dialog(self, self._is_dark)
-        self._load_file_info()
-        self._load_page_data()
+        self._loading_overlay = LoadingOverlay(self, "Загрузка предпросмотра...")
+
+    def showEvent(self, event):
+        """Запускает первую загрузку после показа окна."""
+        super().showEvent(event)
+        if not self._loading_started:
+            self._loading_started = True
+            self._load_initial_preview_async()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -2109,9 +2117,9 @@ class TSVPreviewDialog(QDialog):
         self.search_column_combo.addItem("Все столбцы")
         search_layout.addWidget(self.search_column_combo)
 
-        search_btn = PrimaryButton("Найти")
-        search_btn.clicked.connect(self._search)
-        search_layout.addWidget(search_btn)
+        self.search_btn = PrimaryButton("Найти")
+        self.search_btn.clicked.connect(self._search)
+        search_layout.addWidget(self.search_btn)
 
         self.search_info_label = QLabel("")
         search_layout.addWidget(self.search_info_label)
@@ -2126,16 +2134,16 @@ class TSVPreviewDialog(QDialog):
         # Навигация
         nav_layout = QHBoxLayout()
 
-        prev_btn = SecondaryButton("← Пред.")
-        prev_btn.clicked.connect(self._prev_page)
-        nav_layout.addWidget(prev_btn)
+        self.prev_btn = SecondaryButton("← Пред.")
+        self.prev_btn.clicked.connect(self._prev_page)
+        nav_layout.addWidget(self.prev_btn)
 
         self.page_info_label = QLabel("Стр. 1")
         nav_layout.addWidget(self.page_info_label)
 
-        next_btn = SecondaryButton("След. →")
-        next_btn.clicked.connect(self._next_page)
-        nav_layout.addWidget(next_btn)
+        self.next_btn = SecondaryButton("След. →")
+        self.next_btn.clicked.connect(self._next_page)
+        nav_layout.addWidget(self.next_btn)
 
         nav_layout.addWidget(QLabel("Строк на странице:"))
         self.rows_per_page_combo = QComboBox()
@@ -2146,53 +2154,134 @@ class TSVPreviewDialog(QDialog):
 
         nav_layout.addStretch()
 
-        close_btn = SecondaryButton("Закрыть")
-        close_btn.clicked.connect(self.accept)
-        nav_layout.addWidget(close_btn)
+        self.close_btn = SecondaryButton("Закрыть")
+        self.close_btn.clicked.connect(self.accept)
+        nav_layout.addWidget(self.close_btn)
 
         layout.addLayout(nav_layout)
 
-    def _load_file_info(self):
-        """Загружает информацию о файле."""
-        try:
-            self._encoding = FileUtilities.get_encoding(self._file_path)
-            self._delimiter = FileUtilities.get_delimiter(self._file_path)
+        self._set_preview_controls_enabled(False)
 
-            with open(
-                self._file_path, "r", encoding=self._encoding, errors="replace"
-            ) as f:
-                reader = csv.reader(f, delimiter=self._delimiter)
-                headers = next(reader, [])
-                self._headers = headers if headers else []
+    @staticmethod
+    def _load_initial_preview_data(file_path: str, rows_per_page: int):
+        """Загружает метаданные и первую страницу предпросмотра в фоне."""
+        encoding = FileUtilities.get_encoding(file_path)
+        delimiter = FileUtilities.get_delimiter(file_path)
 
-                self.search_column_combo.clear()
-                self.search_column_combo.addItem("Все столбцы")
-                self.search_column_combo.addItems(self._headers)
+        with open(file_path, "r", encoding=encoding, errors="replace") as f:
+            reader = csv.reader(f, delimiter=delimiter)
+            headers = next(reader, [])
+            rows = []
+            total_rows = 0
 
-                # Подсчёт строк данных без заголовка
-                self._total_rows = sum(1 for _ in reader)
+            for row_idx, row in enumerate(reader):
+                total_rows += 1
+                if row_idx < rows_per_page:
+                    rows.append(row)
 
-            self._update_page_info()
-        except (OSError, IOError, UnicodeDecodeError) as e:
-            msgbox = QMessageBox(
-                QMessageBox.Icon.Critical,
-                "Ошибка",
-                f"Ошибка чтения файла: {e}",
-                QMessageBox.StandardButton.Ok,
-                self,
-            )
-            apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
-            msgbox.exec()
+        return {
+            "encoding": encoding,
+            "delimiter": delimiter,
+            "headers": headers if headers else [],
+            "total_rows": total_rows,
+            "rows": rows,
+        }
+
+    def _load_initial_preview_async(self):
+        """Запускает асинхронную загрузку первого экрана предпросмотра."""
+        self._show_loading()
+        self._worker = LoadingWorker(
+            self._load_initial_preview_data, self._file_path, self._rows_per_page
+        )
+        self._worker.finished.connect(self._on_initial_preview_loaded)
+        self._worker.error.connect(self._on_initial_preview_error)
+        self._worker.start()
+
+    @Slot(object)
+    def _on_initial_preview_loaded(self, preview_data):
+        """Обрабатывает успешную загрузку первого экрана предпросмотра."""
+        self._encoding = preview_data["encoding"]
+        self._delimiter = preview_data["delimiter"]
+        self._headers = preview_data["headers"]
+        self._total_rows = preview_data["total_rows"]
+
+        self.search_column_combo.clear()
+        self.search_column_combo.addItem("Все столбцы")
+        self.search_column_combo.addItems(self._headers)
+
+        self._render_page_rows(preview_data["rows"])
+        self._update_page_info()
+        self._hide_loading()
+
+        if self._worker:
+            self._worker.deleteLater()
+            self._worker = None
+
+    @Slot(str)
+    def _on_initial_preview_error(self, error: str):
+        """Обрабатывает ошибку первой загрузки предпросмотра."""
+        self._hide_loading()
+        if self._worker:
+            self._worker.deleteLater()
+            self._worker = None
+
+        msgbox = QMessageBox(
+            QMessageBox.Icon.Critical,
+            "Ошибка",
+            f"Ошибка чтения файла: {error}",
+            QMessageBox.StandardButton.Ok,
+            self,
+        )
+        apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
+        msgbox.exec()
+        self.reject()
+
+    def _set_preview_controls_enabled(self, enabled: bool):
+        """Переключает доступность элементов управления предпросмотром."""
+        self.search_edit.setEnabled(enabled)
+        self.search_column_combo.setEnabled(enabled)
+        self.search_btn.setEnabled(enabled)
+        self.table_widget.setEnabled(enabled)
+        self.prev_btn.setEnabled(enabled)
+        self.next_btn.setEnabled(enabled)
+        self.rows_per_page_combo.setEnabled(enabled)
+
+    def _show_loading(self):
+        """Показывает лоадер во время первичной загрузки окна."""
+        self._loading_overlay.resize(self.size())
+        self._loading_overlay.start_animation()
+        self._set_preview_controls_enabled(False)
+        self.close_btn.setEnabled(False)
+
+    def _hide_loading(self):
+        """Скрывает лоадер после первичной загрузки окна."""
+        self._loading_overlay.stop_animation()
+        self._set_preview_controls_enabled(True)
+        self.close_btn.setEnabled(True)
+
+    def _render_page_rows(self, rows):
+        """Отрисовывает строки текущей страницы в таблице."""
+        self.table_widget.clear()
+        self.table_widget.setColumnCount(len(self._headers))
+        self.table_widget.setHorizontalHeaderLabels(self._headers)
+        self.table_widget.setRowCount(0)
+
+        for row_idx, values in enumerate(rows):
+            self.table_widget.insertRow(row_idx)
+            for col_idx, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                self.table_widget.setItem(row_idx, col_idx, item)
+
+        self.table_widget.resizeColumnsToContents()
+
+        if self._active_search_text:
+            self._highlight_search_matches_on_page()
 
     def _load_page_data(self):
         """Загружает данные для текущей страницы."""
         try:
             start_row = (self._current_page - 1) * self._rows_per_page
-
-            self.table_widget.clear()
-            self.table_widget.setColumnCount(len(self._headers))
-            self.table_widget.setHorizontalHeaderLabels(self._headers)
-            self.table_widget.setRowCount(0)
+            page_rows = []
 
             with open(
                 self._file_path, "r", encoding=self._encoding, errors="replace"
@@ -2212,15 +2301,9 @@ class TSVPreviewDialog(QDialog):
                     if values is None:
                         break
 
-                    self.table_widget.insertRow(row_idx)
-                    for col_idx, value in enumerate(values):
-                        item = QTableWidgetItem(str(value))
-                        self.table_widget.setItem(row_idx, col_idx, item)
+                    page_rows.append(values)
 
-            self.table_widget.resizeColumnsToContents()
-
-            if self._active_search_text:
-                self._highlight_search_matches_on_page()
+            self._render_page_rows(page_rows)
         except (OSError, IOError, UnicodeDecodeError) as e:
             msgbox = QMessageBox(
                 QMessageBox.Icon.Critical,
@@ -2341,6 +2424,25 @@ class TSVPreviewDialog(QDialog):
         self._current_page = match_page
         self._load_page_data()
         self._update_page_info()
+
+    def reject(self):
+        """Блокирует закрытие диалога во время фоновой стартовой загрузки."""
+        if self._worker and self._worker.isRunning():
+            return
+        super().reject()
+
+    def closeEvent(self, event):
+        """Блокирует закрытие окна во время фоновой стартовой загрузки."""
+        if self._worker and self._worker.isRunning():
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def resizeEvent(self, event):
+        """Обновляет размер лоадера при изменении размера окна предпросмотра."""
+        super().resizeEvent(event)
+        if hasattr(self, "_loading_overlay"):
+            self._loading_overlay.resize(self.size())
 
 
 # ============================================================================
