@@ -34,6 +34,7 @@ class ConversionConfig:
     styles: Dict[str, Any]
     header_color: str
     split_column: str
+    split_mode: str  # "sheets" или "files"
     selected_values: List[str]
     filter_column: str
     filter_values: List[str]
@@ -233,15 +234,12 @@ class FileUtilities:
                     return "utf-8-sig"
                 else:
                     # Пробуем UTF-8 first, затем windows-1251
-                    if file_path.lower().endswith(".csv"):
-                        try:
-                            with open(file_path, "r", encoding="utf-8") as f:
-                                f.read(8192)
-                            return "utf-8"
-                        except UnicodeDecodeError:
-                            return "windows-1251"
-                    else:
+                    try:
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            f.read(8192)
                         return "utf-8"
+                    except UnicodeDecodeError:
+                        return "windows-1251"
         except Exception:
             return "utf-8"
 
@@ -431,7 +429,9 @@ class TSVToExcelConverter(QThread):
 
     # Архитектурные константы
     MAX_EXCEL_ROWS = 1000000  # Ограничение в 1млн строк на один лист Excel
-    STOP_CHECK_INTERVAL = 2000  # Как часто (в строках) проверять флаг остановки конвертации
+    STOP_CHECK_INTERVAL = (
+        2000  # Как часто (в строках) проверять флаг остановки конвертации
+    )
 
     def __init__(
         self,
@@ -443,6 +443,7 @@ class TSVToExcelConverter(QThread):
         styles: Optional[Dict[str, Any]] = None,
         header_color: str = "#C8DCF0",
         split_column: str = "",
+        split_mode: str = "sheets",
         selected_values: Optional[List[str]] = None,
         filter_column: str = "",
         filter_values: Optional[List[str]] = None,
@@ -458,6 +459,7 @@ class TSVToExcelConverter(QThread):
         self.styles = styles or {}
         self.header_color = header_color
         self.split_column = split_column
+        self.split_mode = split_mode
         self.selected_values = selected_values or []
         self.filter_column = filter_column
         self.filter_values = filter_values or []
@@ -531,6 +533,17 @@ class TSVToExcelConverter(QThread):
         except Exception as e:
             self.log_message.emit(f"Критическая ошибка: {str(e)}", QColor("red"))
             self.error.emit(str(e))
+
+    def _get_split_value(self, row: List[str], split_idx: int, selected_vals: List[str]) -> str:
+        """Извлекает значение для разделения и применяет логику 'Остальные'."""
+        value = row[split_idx] if split_idx < len(row) else ""
+        if not value or not value.strip():
+            return ""
+
+        if selected_vals and value not in selected_vals:
+            return "Остальные"
+
+        return value
 
     def _finish_as_stopped(self):
         """Завершает поток в статусе пользовательской остановки."""
@@ -715,160 +728,91 @@ class TSVToExcelConverter(QThread):
     def _write_single_csv(self, reader, headers, base_name, filter_idx):
         output_path = os.path.join(self.output_directory, f"{base_name}.csv")
         current_file = os.path.basename(output_path)
-        update_freq = max(1, self.total_rows // 100)
 
         with open(output_path, "w", encoding="utf-8-sig", newline="") as out_f:
             writer = csv.writer(out_f, delimiter=";")
             writer.writerow(headers)
 
-            if filter_idx is not None and self.filter_values:
-                filter_vals = self.filter_values
-                for i, row in enumerate(reader):
-                    if i % 2000 == 0 and self.stop_flag:
-                        break
-                    if filter_idx < len(row) and row[filter_idx] not in filter_vals:
-                        continue
-                    writer.writerow(row)
-                    self.processed_rows += 1
-                    if self.processed_rows % update_freq == 0:
-                        self._emit_progress_update(current_file, "Запись CSV...")
-            else:
-                for i, row in enumerate(reader):
-                    if i % 2000 == 0 and self.stop_flag:
-                        break
-                    writer.writerow(row)
-                    self.processed_rows += 1
-                    if self.processed_rows % update_freq == 0:
-                        self._emit_progress_update(current_file, "Запись CSV...")
+            def process_row(row):
+                writer.writerow(row)
 
-        self._emit_progress_update(current_file, "Запись CSV...", force=True)
+            self._process_rows_with_progress(
+                reader, filter_idx, current_file, process_row, "Запись CSV..."
+            )
 
         self.output_file_path = output_path
 
     def _write_split_csv(self, reader, headers, base_name, split_idx, filter_idx):
-
         MAX_OPEN_FILES = 200
         open_files = {}
         writers = {}
         used_file_names: Set[str] = set()
         file_paths: Dict[str, str] = {}
+        row_counts: Dict[str, int] = {}
         selected_vals = self.selected_values
         current_file = f"{base_name}_*.csv"
-        update_freq = max(1, self.total_rows // 100)
+
+        def _create_csv_file(key: str):
+            """Создаёт CSV файл и записывает заголовок."""
+            safe_key = FileUtilities.sanitize_file_stem(key, used_file_names)
+            file_path = os.path.join(
+                self.output_directory, f"{base_name}_{safe_key}.csv"
+            )
+            file_paths[key] = file_path
+
+            f = open(file_path, "w", encoding="utf-8-sig", newline="")
+            writer = csv.writer(f, delimiter=";")
+            writer.writerow(headers)
+
+            open_files[key] = f
+            writers[key] = writer
+            row_counts[key] = 0
+
+            return file_path
+
+        def process_row(row):
+            key = self._get_split_value(row, split_idx, selected_vals)
+            if not key:
+                return
+
+            if key not in writers:
+                if len(open_files) >= MAX_OPEN_FILES:
+                    oldest_key = next(iter(open_files))
+                    open_files[oldest_key].close()
+                    del open_files[oldest_key]
+                    del writers[oldest_key]
+
+                _create_csv_file(key)
+
+            writers[key].writerow(row)
+            row_counts[key] = row_counts.get(key, 0) + 1
 
         try:
-            # Разделяем циклы для оптимизации
-            if filter_idx is not None and self.filter_values:
-                filter_vals = self.filter_values
-                for i, row in enumerate(reader):
-                    if i % self.STOP_CHECK_INTERVAL == 0 and self.stop_flag:
-                        break
-
-                    if filter_idx < len(row) and row[filter_idx] not in filter_vals:
-                        continue
-
-                    self._process_split_row(
-                        row,
-                        split_idx,
-                        selected_vals,
-                        headers,
-                        base_name,
-                        open_files,
-                        writers,
-                        used_file_names,
-                        file_paths,
-                        MAX_OPEN_FILES,
-                    )
-                    self.processed_rows += 1
-                    if self.processed_rows % update_freq == 0:
-                        self._emit_progress_update(
-                            current_file, "Распределение по CSV..."
-                        )
-            else:
-                for i, row in enumerate(reader):
-                    if i % self.STOP_CHECK_INTERVAL == 0 and self.stop_flag:
-                        break
-
-                    self._process_split_row(
-                        row,
-                        split_idx,
-                        selected_vals,
-                        headers,
-                        base_name,
-                        open_files,
-                        writers,
-                        used_file_names,
-                        file_paths,
-                        MAX_OPEN_FILES,
-                    )
-                    self.processed_rows += 1
-                    if self.processed_rows % update_freq == 0:
-                        self._emit_progress_update(
-                            current_file, "Распределение по CSV..."
-                        )
-
+            self._process_rows_with_progress(
+                reader, filter_idx, current_file, process_row, "Распределение по CSV..."
+            )
         finally:
             for f in open_files.values():
                 f.close()
 
-        self._emit_progress_update(current_file, "Распределение по CSV...", force=True)
+        files_to_remove = []
+        for key, count in row_counts.items():
+            if count == 0 and key in file_paths:
+                files_to_remove.append(file_paths[key])
 
-        # Указываем путь к папке как результат
+        for file_path in files_to_remove:
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+
+        if files_to_remove:
+            self.log_message.emit(
+                f"Удалено пустых CSV файлов (без данных): {len(files_to_remove)}",
+                QColor("blue"),
+            )
+
         self.output_file_path = self.output_directory
-
-    def _process_split_row(
-        self,
-        row,
-        split_idx,
-        selected_vals,
-        headers,
-        base_name,
-        open_files,
-        writers,
-        used_file_names,
-        file_paths,
-        max_open_files,
-    ):
-        """Вспомогательный метод для записи строки в нужный файл с LRU кэшированием."""
-        key = row[split_idx] if split_idx < len(row) else "Unknown"
-        if selected_vals and key not in selected_vals:
-            key = "Остальные"
-
-        if key not in writers:
-            # Если достигли лимита открытых файлов, закрываем самый старый (LRU)
-            if len(open_files) >= max_open_files:
-                oldest_key = next(iter(open_files))
-                open_files[oldest_key].close()
-                del open_files[oldest_key]
-                del writers[oldest_key]
-
-            if key not in file_paths:
-                # Файл создаётся впервые
-                safe_key = FileUtilities.sanitize_file_stem(key, used_file_names)
-                file_path = os.path.join(
-                    self.output_directory, f"{base_name}_{safe_key}.csv"
-                )
-                file_paths[key] = file_path
-                
-                f = open(file_path, "w", encoding="utf-8-sig", newline="")
-                writer = csv.writer(f, delimiter=";")
-                writer.writerow(headers)
-            else:
-                # Файл уже был создан, открываем на дозапись
-                file_path = file_paths[key]
-                f = open(file_path, "a", encoding="utf-8-sig", newline="")
-                writer = csv.writer(f, delimiter=";")
-
-            open_files[key] = f
-            writers[key] = writer
-        else:
-            # Обновляем позицию ключа в словарях для LRU
-            f = open_files.pop(key)
-            writer = writers.pop(key)
-            open_files[key] = f
-            writers[key] = writer
-
-        writers[key].writerow(row)
 
     def _create_csv_pivot(self, input_file, base_name):
         try:
@@ -926,19 +870,21 @@ class TSVToExcelConverter(QThread):
         base_name = self._build_output_base_name(input_file, file_index)
         output_path = os.path.join(self.output_directory, f"{base_name}.xlsx")
 
+        # Режим разделения на файлы — workbook не нужен
+        split_to_files = False
+        if self.split_column and self.split_column != "Не разделять":
+            if self.split_mode == "files":
+                split_to_files = True
+
         workbook = None
         result = "error"
         try:
-            # Создаём книгу Excel
-            workbook = xlsxwriter.Workbook(
-                output_path,
-                {"constant_memory": True, "use_zip64": True, "in_memory": False},
-            )
+            if not split_to_files:
+                workbook = xlsxwriter.Workbook(
+                    output_path, {"constant_memory": True, "use_zip64": True, "in_memory": False}
+                )
+                self._init_formats(workbook)
 
-            # Инициализируем форматы
-            self._init_formats(workbook)
-
-            # Открываем исходный файл
             with open(input_file, "r", encoding=encoding, errors="replace") as f:
                 reader = csv.reader(f, delimiter=delimiter)
 
@@ -948,7 +894,6 @@ class TSVToExcelConverter(QThread):
                     self.log_message.emit("Пустой файл", QColor("red"))
                     return "error"
 
-                # Индексы
                 split_idx = None
                 filter_idx = None
 
@@ -964,29 +909,24 @@ class TSVToExcelConverter(QThread):
                     except ValueError:
                         filter_idx = None
 
-                # Конвертация
                 if split_idx is not None:
-                    self._convert_with_split(
-                        workbook,
-                        reader,
-                        headers,
-                        split_idx,
-                        filter_idx,
-                        os.path.basename(input_file),
-                    )
-                else:
+                    if self.split_mode == "files":
+                        self._convert_with_split_to_files(
+                            reader, headers, split_idx, filter_idx, base_name, os.path.basename(input_file),
+                        )
+                    else:
+                        self._convert_with_split(
+                            workbook, reader, headers, split_idx, filter_idx, os.path.basename(input_file),
+                        )
+                elif not split_to_files:
                     self._convert_without_split(
-                        workbook,
-                        reader,
-                        headers,
-                        filter_idx,
-                        os.path.basename(input_file),
+                        workbook, reader, headers, filter_idx, os.path.basename(input_file),
                     )
 
             if self.stop_flag:
                 result = "stopped"
             else:
-                # Обработка сводной таблицы (ДО закрытия книги!)
+                # Обработка сводной таблицы
                 if self.pivot_settings:
                     try:
                         self.log_message.emit(
@@ -1005,33 +945,73 @@ class TSVToExcelConverter(QThread):
                         )
 
                         if pivot_data:
-                            # Создаём форматы для сводной
-                            header_format = workbook.add_format(
-                                {
-                                    "bold": self.styles.get("bold", False),
-                                    "italic": self.styles.get("italic", False),
-                                    "font_size": self.styles.get("font_size", 12),
-                                    "font_name": self.styles.get("font_name", "Arial"),
-                                    "bg_color": self.header_color,
-                                    "align": "center",
-                                    "valign": "vcenter",
-                                }
-                            )
-                            if self.styles.get("border", 0) == 1:
-                                header_format.set_border(1)
+                            if self.split_mode == "files" and split_idx is not None:
+                                # При разделении на файлы — сводная в отдельный файл
+                                pivot_output_path = os.path.join(
+                                    self.output_directory, f"{base_name}_Pivot.xlsx"
+                                )
+                                pivot_workbook = xlsxwriter.Workbook(pivot_output_path)
 
-                            cached_formats = {"header": header_format}
+                                header_format = pivot_workbook.add_format(
+                                    {
+                                        "bold": self.styles.get("bold", False),
+                                        "italic": self.styles.get("italic", False),
+                                        "font_size": self.styles.get("font_size", 12),
+                                        "font_name": self.styles.get(
+                                            "font_name", "Arial"
+                                        ),
+                                        "bg_color": self.header_color,
+                                        "align": "center",
+                                        "valign": "vcenter",
+                                    }
+                                )
+                                if self.styles.get("border", 0) == 1:
+                                    header_format.set_border(1)
 
-                            processor.write_pivot_table(
-                                workbook,
-                                pivot_data,
-                                self.pivot_settings,
-                                cached_formats,
-                            )
+                                cached_formats = {"header": header_format}
 
-                            self.log_message.emit(
-                                "Сводная таблица создана", QColor("green")
-                            )
+                                processor.write_pivot_table(
+                                    pivot_workbook,
+                                    pivot_data,
+                                    self.pivot_settings,
+                                    cached_formats,
+                                )
+                                pivot_workbook.close()
+
+                                self.log_message.emit(
+                                    f"Сводная таблица: {os.path.basename(pivot_output_path)}",
+                                    QColor("green"),
+                                )
+                            else:
+                                # Сводная в текущий workbook
+                                header_format = workbook.add_format(
+                                    {
+                                        "bold": self.styles.get("bold", False),
+                                        "italic": self.styles.get("italic", False),
+                                        "font_size": self.styles.get("font_size", 12),
+                                        "font_name": self.styles.get(
+                                            "font_name", "Arial"
+                                        ),
+                                        "bg_color": self.header_color,
+                                        "align": "center",
+                                        "valign": "vcenter",
+                                    }
+                                )
+                                if self.styles.get("border", 0) == 1:
+                                    header_format.set_border(1)
+
+                                cached_formats = {"header": header_format}
+
+                                processor.write_pivot_table(
+                                    workbook,
+                                    pivot_data,
+                                    self.pivot_settings,
+                                    cached_formats,
+                                )
+
+                                self.log_message.emit(
+                                    "Сводная таблица создана", QColor("green")
+                                )
                         else:
                             self.log_message.emit(
                                 "Нет данных для сводной таблицы", QColor("orange")
@@ -1049,32 +1029,35 @@ class TSVToExcelConverter(QThread):
             result = "error"
 
         finally:
-            # Гарантированно закрываем workbook
             if workbook is not None:
                 try:
                     workbook.close()
                 except Exception:
                     pass
 
-            # При ошибке удаляем частичный файл
-            if result != "success" and os.path.exists(output_path):
+            if result != "success" and not split_to_files and os.path.exists(output_path):
                 try:
                     os.remove(output_path)
                 except Exception:
                     pass
 
         if result == "success":
-            self.output_file_path = output_path
+            if not split_to_files:
+                self.output_file_path = output_path
 
-            # Время обработки
-            elapsed = time.time() - start_time
-            minutes = int(elapsed // 60)
-            seconds = int(elapsed % 60)
+                elapsed = time.time() - start_time
+                minutes = int(elapsed // 60)
+                seconds = int(elapsed % 60)
 
-            self.log_message.emit(
-                f"Файл сохранён: {os.path.basename(output_path)} ({minutes:02d}:{seconds:02d})",
-                QColor("green"),
-            )
+                self.log_message.emit(
+                    f"Файл сохранён: {os.path.basename(output_path)} ({minutes:02d}:{seconds:02d})",
+                    QColor("green"),
+                )
+            else:
+                self.log_message.emit(
+                    "Разделение на файлы завершено",
+                    QColor("green"),
+                )
 
         return result
 
@@ -1119,6 +1102,7 @@ class TSVToExcelConverter(QThread):
         filter_idx: Optional[int],
         current_file: str,
         row_handler,
+        operation_name: str = "Запись данных...",
     ):
         """Обрабатывает строки с фильтрацией, остановкой и обновлением прогресса."""
         update_freq = max(1, self.total_rows // 100)
@@ -1135,7 +1119,7 @@ class TSVToExcelConverter(QThread):
                 row_handler(row)
                 self.processed_rows += 1
                 if self.processed_rows % update_freq == 0:
-                    self._emit_progress_update(current_file, "Запись данных...")
+                    self._emit_progress_update(current_file, operation_name)
         else:
             for row_num, row in enumerate(reader, 1):
                 if row_num % self.STOP_CHECK_INTERVAL == 0 and self.stop_flag:
@@ -1144,9 +1128,9 @@ class TSVToExcelConverter(QThread):
                 row_handler(row)
                 self.processed_rows += 1
                 if self.processed_rows % update_freq == 0:
-                    self._emit_progress_update(current_file, "Запись данных...")
+                    self._emit_progress_update(current_file, operation_name)
 
-        self._emit_progress_update(current_file, "Запись данных...", force=True)
+        self._emit_progress_update(current_file, operation_name, force=True)
 
     def _convert_with_split(
         self,
@@ -1160,78 +1144,169 @@ class TSVToExcelConverter(QThread):
         """Конвертация с разделением по столбцу."""
         worksheets: Dict[str, Any] = {}
         sheet_row_counts: Dict[str, int] = {}
-        others_worksheet = None
-        others_row_count = 0
 
         used_names: Set[str] = set()
         MAX_ROWS = self.MAX_EXCEL_ROWS
         selected_vals = self.selected_values
 
-        # Вспомогательная функция для обработки одной строки
+        def _create_sheet_with_headers(sheet_name: str):
+            ws = workbook.add_worksheet(sheet_name)
+            for col, header in enumerate(headers):
+                ws.write(0, col, header, self._cached_formats["header"])
+            return ws, 1
+
         def process_row(row):
-            nonlocal others_worksheet, others_row_count
-            value = row[split_idx] if split_idx < len(row) else "Unknown"
+            value = self._get_split_value(row, split_idx, selected_vals)
+            if not value:
+                return
 
-            # Проверяем выбранное значение
-            if selected_vals and value not in selected_vals:
-                # В "Остальные"
-                if others_worksheet is None or others_row_count >= MAX_ROWS:
-                    sheet_name = FileUtilities.sanitize_sheet_name(
-                        "Остальные", used_names
-                    )
-                    others_worksheet = workbook.add_worksheet(sheet_name)
-                    others_row_count = 0
+            if value not in worksheets:
+                sheet_name = FileUtilities.sanitize_sheet_name(value, used_names)
+                ws, row_count = _create_sheet_with_headers(sheet_name)
+                worksheets[value] = ws
+                sheet_row_counts[value] = row_count
 
-                    # Заголовок
-                    for col, header in enumerate(headers):
-                        others_worksheet.write(
-                            others_row_count,
-                            col,
-                            header,
-                            self._cached_formats["header"],
-                        )
-                    others_row_count = 1
-
-                others_worksheet.write_row(
-                    others_row_count, 0, row, self._cached_formats["cell"]
+            current_row = sheet_row_counts[value]
+            if current_row >= MAX_ROWS:
+                sheet_name = FileUtilities.sanitize_sheet_name(
+                    f"{value}_2", used_names
                 )
-                others_row_count += 1
+                ws, current_row = _create_sheet_with_headers(sheet_name)
+                worksheets[value] = ws
+                sheet_row_counts[value] = current_row
 
-            else:
-                # В свой лист
-                if value not in worksheets:
-                    sheet_name = FileUtilities.sanitize_sheet_name(value, used_names)
-                    worksheets[value] = workbook.add_worksheet(sheet_name)
-                    sheet_row_counts[value] = 0
-
-                    # Заголовок
-                    for col, header in enumerate(headers):
-                        worksheets[value].write(
-                            0, col, header, self._cached_formats["header"]
-                        )
-                    sheet_row_counts[value] = 1
-
-                current_row = sheet_row_counts[value]
-                if current_row >= MAX_ROWS:
-                    # Новый лист для этого значения
-                    sheet_name = FileUtilities.sanitize_sheet_name(
-                        f"{value}_2", used_names
-                    )
-                    worksheets[value] = workbook.add_worksheet(sheet_name)
-                    current_row = 0
-
-                    for col, header in enumerate(headers):
-                        worksheets[value].write(
-                            current_row, col, header, self._cached_formats["header"]
-                        )
-                    current_row = 1
-
-                worksheets[value].write_row(
-                    current_row, 0, row, self._cached_formats["cell"]
-                )
-                sheet_row_counts[value] = current_row + 1
+            worksheets[value].write_row(
+                current_row, 0, row, self._cached_formats["cell"]
+            )
+            sheet_row_counts[value] = current_row + 1
 
         self._process_rows_with_progress(reader, filter_idx, current_file, process_row)
+
+    def _convert_with_split_to_files(
+        self,
+        reader: csv.reader,
+        headers: List[str],
+        split_idx: int,
+        filter_idx: Optional[int],
+        base_name: str,
+        current_file: str,
+    ):
+        """
+        Конвертация с разделением на отдельные XLSX файлы.
+        Каждое выбранное значение → отдельный .xlsx файл с одним листом.
+        """
+        open_workbooks: Dict[str, xlsxwriter.Workbook] = {}
+        open_worksheets: Dict[str, Any] = {}
+        open_row_counts: Dict[str, int] = {}
+        used_file_names: Set[str] = set()
+        file_paths: Dict[str, str] = {}
+        selected_vals = self.selected_values
+        output_files: List[str] = []
+
+        def _create_workbook_for_value(value: str):
+            """Создаёт новый workbook для значения."""
+            safe_value = FileUtilities.sanitize_file_stem(value, used_file_names)
+            sheet_name = FileUtilities.sanitize_sheet_name(safe_value, used_file_names)
+            file_path = os.path.join(
+                self.output_directory, f"{base_name}_{safe_value}.xlsx"
+            )
+            file_paths[value] = file_path
+
+            workbook = xlsxwriter.Workbook(
+                file_path, {"constant_memory": True, "in_memory": False}
+            )
+
+            header_format = workbook.add_format(
+                {
+                    "bold": self.styles.get("bold", False),
+                    "italic": self.styles.get("italic", False),
+                    "font_size": self.styles.get("font_size", 12),
+                    "font_name": self.styles.get("font_name", "Arial"),
+                    "bg_color": self.header_color,
+                    "align": "center",
+                    "valign": "vcenter",
+                }
+            )
+            if self.styles.get("border", 0) == 1:
+                header_format.set_border(1)
+
+            cell_format = workbook.add_format(
+                {
+                    "font_size": self.styles.get("font_size", 12),
+                    "font_name": self.styles.get("font_name", "Arial"),
+                }
+            )
+            if self.styles.get("border", 0) == 1:
+                cell_format.set_border(1)
+
+            worksheet = workbook.add_worksheet(sheet_name)
+
+            for col, header in enumerate(headers):
+                worksheet.write(0, col, header, header_format)
+
+            open_workbooks[value] = workbook
+            open_worksheets[value] = worksheet
+            open_row_counts[value] = 1
+            workbook._tsv_cell_format = cell_format
+
+            output_files.append(file_path)
+
+        def process_row(row):
+            value = self._get_split_value(row, split_idx, selected_vals)
+            if not value:
+                return
+
+            if value not in open_worksheets:
+                _create_workbook_for_value(value)
+
+            if value not in open_worksheets or value not in open_row_counts:
+                return
+
+            worksheet = open_worksheets[value]
+            row_count = open_row_counts[value]
+            workbook = open_workbooks[value]
+            worksheet.write_row(row_count, 0, row, workbook._tsv_cell_format)
+            open_row_counts[value] = row_count + 1
+
+        self._process_rows_with_progress(reader, filter_idx, current_file, process_row)
+
+        # Закрываем все workbook
+        for value, wb in open_workbooks.items():
+            try:
+                wb.close()
+            except Exception:
+                pass
+
+        # Удаляем файлы без данных (только заголовок)
+        # row_count = 1 означает только заголовок, без строк данных
+        files_to_remove = []
+        for value, row_count in open_row_counts.items():
+            if row_count == 1:
+                if value in file_paths:
+                    files_to_remove.append(file_paths[value])
+
+        for file_path in files_to_remove:
+            try:
+                os.remove(file_path)
+                if file_path in output_files:
+                    output_files.remove(file_path)
+            except Exception:
+                pass
+
+        if files_to_remove:
+            self.log_message.emit(
+                f"Удалено пустых файлов (без данных): {len(files_to_remove)}",
+                QColor("blue"),
+            )
+
+        if len(open_workbooks) > 100:
+            self.log_message.emit(
+                f"Создано {len(open_workbooks)} файлов. При большом количестве "
+                f"уникальных значений возможно превышение лимита открытых файлов ОС.",
+                QColor("orange"),
+            )
+
+        self.output_file_path = self.output_directory
 
     def _convert_without_split(
         self,
@@ -1363,9 +1438,16 @@ class PivotTableProcessor:
 
                 # Агрегация (Online Aggregation)
                 def get_default_agg_state():
-                    return {"sum": 0.0, "count": 0, "max": float("-inf"), "min": float("inf")}
+                    return {
+                        "sum": 0.0,
+                        "count": 0,
+                        "max": float("-inf"),
+                        "min": float("inf"),
+                    }
 
-                pivot_data = defaultdict(lambda: defaultdict(lambda: defaultdict(get_default_agg_state)))
+                pivot_data = defaultdict(
+                    lambda: defaultdict(lambda: defaultdict(get_default_agg_state))
+                )
                 duplicates_removed = 0
 
                 for row in reader:
@@ -1402,7 +1484,7 @@ class PivotTableProcessor:
                                 val_idx = headers.index(val_setting["field"])
                                 value = row[val_idx] if val_idx < len(row) else ""
                                 key = f"{val_setting['field']}_{val_setting['aggregation']}"
-                                
+
                                 state = pivot_data[row_key][col_key][key]
 
                                 if val_setting["aggregation"] == "Количество":
@@ -1412,7 +1494,7 @@ class PivotTableProcessor:
                                         num_value = float(value) if value else 0.0
                                     except (ValueError, AttributeError):
                                         num_value = 0.0
-                                    
+
                                     state["sum"] += num_value
                                     state["count"] += 1
                                     if num_value > state["max"]:
@@ -1444,7 +1526,9 @@ class PivotTableProcessor:
                             if val_setting["aggregation"] == "Сумма":
                                 aggregated[row_key][col_key][key] = state["sum"]
                             elif val_setting["aggregation"] == "Среднее":
-                                aggregated[row_key][col_key][key] = state["sum"] / state["count"]
+                                aggregated[row_key][col_key][key] = (
+                                    state["sum"] / state["count"]
+                                )
                             elif val_setting["aggregation"] == "Количество":
                                 aggregated[row_key][col_key][key] = state["count"]
                             elif val_setting["aggregation"] == "Максимум":

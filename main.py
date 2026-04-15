@@ -42,7 +42,7 @@ class TSVConverterApp:
         # Таймер
         self._timer = QTimer()
         self._start_time = None
-        
+
         # Воркеры подсчета строк (чтобы сборщик мусора не убил активный поток)
         self._active_workers = []
 
@@ -133,33 +133,33 @@ class TSVConverterApp:
             self.window.file_list.item(i).text()
             for i in range(self.window.file_list.count())
         ]
-        
+
         if not files:
             self.window.total_rows_label.setText("Строк: 0")
             return
-            
+
         filter_col = self.window.filter_column_combo.currentText()
         filter_values = dict(self.window._filter_values)
-        
+
         # Обновляем UI
         self.window.total_rows_label.setText("Строк: Подсчет...")
-        
+
         # Запускаем в отдельном потоке
-        worker = LoadingWorker(
-            self._count_rows_task, files, filter_col, filter_values
-        )
+        worker = LoadingWorker(self._count_rows_task, files, filter_col, filter_values)
         worker.finished.connect(
             lambda total: self.window.total_rows_label.setText(f"Строк: {total}")
         )
         worker.error.connect(
-            lambda err: self._log_message(f"Ошибка подсчёта строк: {err}", QColor("red"))
+            lambda err: self._log_message(
+                f"Ошибка подсчёта строк: {err}", QColor("red")
+            )
         )
-        
+
         # Сначала очищаем завершенные потоки
         self._active_workers = [w for w in self._active_workers if w.isRunning()]
         # Затем сохраняем ссылку на новый, чтобы избежать "QThread: Destroyed"
         self._active_workers.append(worker)
-        
+
         worker.start()
 
     @staticmethod
@@ -227,6 +227,7 @@ class TSVConverterApp:
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 selected = dialog.get_selected_values()
                 self.window._selected_column_values[column] = selected
+                self.window._split_modes[column] = dialog.get_split_mode()
                 self._log_message(
                     f"Выбраны значения для разделения: {', '.join(selected[:5])}...",
                     QColor("green"),
@@ -318,6 +319,7 @@ class TSVConverterApp:
             styles=config.styles,
             header_color=config.header_color,
             split_column=config.split_column,
+            split_mode=config.split_mode,
             selected_values=config.selected_values,
             filter_column=config.filter_column,
             filter_values=config.filter_values,

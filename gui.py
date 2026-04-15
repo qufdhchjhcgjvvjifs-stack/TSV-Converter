@@ -1194,6 +1194,14 @@ class ColumnValuesDialog(QDialog):
         self.search_edit.textChanged.connect(self._on_search_text_changed)
         layout.addWidget(self.search_edit)
 
+        # Переключатель режима разделения
+        self.split_files_checkbox = StyledCheckBox("Разделять на файлы")
+        self.split_files_checkbox.setToolTip(
+            "Если включено — каждое значение будет сохранено в отдельный XLSX файл.\n"
+            "Если выключено — все значения будут на разных листах одного файла."
+        )
+        layout.addWidget(self.split_files_checkbox)
+
         # Список с кастомным виджетом для чекбоксов
         # Передаём тему для корректной отрисовки чекбоксов в Windows 11
         self.value_list = CheckBoxListWidget(parent=self, is_dark=self._is_dark)
@@ -1355,6 +1363,10 @@ class ColumnValuesDialog(QDialog):
             if self.value_list._check_states.get(i, Qt.CheckState.Unchecked)
             == Qt.CheckState.Checked
         ]
+
+    def get_split_mode(self) -> str:
+        """Возвращает режим разделения: 'sheets' или 'files'."""
+        return "files" if self.split_files_checkbox.isChecked() else "sheets"
 
 
 class PivotSettingsDialog(QDialog):
@@ -2480,10 +2492,10 @@ class MainWindow(QMainWindow):
         # Данные фильтра и сводной таблицы
         self._filter_values: Dict[str, List[str]] = {}
         self._selected_column_values: Dict[str, List[str]] = {}
+        self._split_modes: Dict[str, str] = {}  # column -> "sheets" или "files"
         self._pivot_settings: Optional[Dict[str, Any]] = None
 
         # Для обновления прогресса
-
 
         # Лоадер загрузки
         self._loading_overlay = None
@@ -3086,11 +3098,8 @@ class MainWindow(QMainWindow):
         self.log_message("Запуск конвертации...", QColor("blue"))
 
         # Собираем параметры в конфигурацию
-        files = [
-            self.file_list.item(i).text()
-            for i in range(self.file_list.count())
-        ]
-        
+        files = [self.file_list.item(i).text() for i in range(self.file_list.count())]
+
         styles = {
             "bold": self.bold_checkbox.isChecked(),
             "italic": self.italic_checkbox.isChecked(),
@@ -3101,6 +3110,12 @@ class MainWindow(QMainWindow):
 
         split_column = self.split_column_combo.currentText()
         filter_column = self.filter_column_combo.currentText()
+
+        split_mode = (
+            self._split_modes.get(split_column, "sheets")
+            if split_column != "Не разделять"
+            else "sheets"
+        )
 
         selected_values = (
             self._selected_column_values.get(split_column, [])
@@ -3122,6 +3137,7 @@ class MainWindow(QMainWindow):
             styles=styles,
             header_color=self._header_color.name(),
             split_column=split_column,
+            split_mode=split_mode,
             selected_values=selected_values,
             filter_column=filter_column,
             filter_values=filter_values,
@@ -3255,7 +3271,6 @@ class MainWindow(QMainWindow):
             self.progress_elapsed_label.setText("00:00")
             self.progress_eta_label.setText("--:--")
             self.progress_speed_label.setText("0 строк/сек")
-
 
 
 # ============================================================================
