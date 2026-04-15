@@ -5,6 +5,7 @@
 
 import os
 import csv
+import gc
 import time
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Set
@@ -883,9 +884,9 @@ class TSVToExcelConverter(QThread):
 
         workbook = None
         result = "error"
+        use_ram_mode = self.total_rows <= self.ram_threshold
         try:
             if not split_to_files:
-                use_ram_mode = self.total_rows <= self.ram_threshold
                 if use_ram_mode:
                     workbook = xlsxwriter.Workbook(output_path, {"in_memory": True})
                     self.log_message.emit(
@@ -1070,6 +1071,11 @@ class TSVToExcelConverter(QThread):
                     workbook.close()
                 except Exception:
                     pass
+
+            if use_ram_mode:
+                workbook = None
+                self._cached_formats = {}
+                gc.collect()
 
             if (
                 result != "success"
@@ -1347,6 +1353,11 @@ class TSVToExcelConverter(QThread):
                 f"уникальных значений возможно превышение лимита открытых файлов ОС.",
                 QColor("orange"),
             )
+
+        if use_ram_mode:
+            open_workbooks.clear()
+            open_worksheets.clear()
+            gc.collect()
 
         self.output_file_path = self.output_directory
 
