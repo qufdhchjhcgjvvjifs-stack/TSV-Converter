@@ -39,6 +39,7 @@ class ConversionConfig:
     filter_column: str
     filter_values: List[str]
     pivot_settings: Dict[str, Any]
+    ram_threshold: int = 500000
 
 
 @dataclass
@@ -448,6 +449,7 @@ class TSVToExcelConverter(QThread):
         filter_column: str = "",
         filter_values: Optional[List[str]] = None,
         pivot_settings: Optional[Dict[str, Any]] = None,
+        ram_threshold: int = 500000,
     ):
         super().__init__()
 
@@ -464,6 +466,7 @@ class TSVToExcelConverter(QThread):
         self.filter_column = filter_column
         self.filter_values = filter_values or []
         self.pivot_settings = pivot_settings
+        self.ram_threshold = ram_threshold
 
         self.stop_flag = False
         self.output_file_path: Optional[str] = None
@@ -534,7 +537,9 @@ class TSVToExcelConverter(QThread):
             self.log_message.emit(f"Критическая ошибка: {str(e)}", QColor("red"))
             self.error.emit(str(e))
 
-    def _get_split_value(self, row: List[str], split_idx: int, selected_vals: List[str]) -> str:
+    def _get_split_value(
+        self, row: List[str], split_idx: int, selected_vals: List[str]
+    ) -> str:
         """Извлекает значение для разделения и применяет логику 'Остальные'."""
         value = row[split_idx] if split_idx < len(row) else ""
         if not value or not value.strip():
@@ -880,9 +885,26 @@ class TSVToExcelConverter(QThread):
         result = "error"
         try:
             if not split_to_files:
-                workbook = xlsxwriter.Workbook(
-                    output_path, {"constant_memory": True, "use_zip64": True, "in_memory": False}
-                )
+                use_ram_mode = self.total_rows <= self.ram_threshold
+                if use_ram_mode:
+                    workbook = xlsxwriter.Workbook(output_path, {"in_memory": True})
+                    self.log_message.emit(
+                        f"Режим: быстрая конвертация (RAM, {self.total_rows:,} строк)",
+                        QColor("blue"),
+                    )
+                else:
+                    workbook = xlsxwriter.Workbook(
+                        output_path,
+                        {
+                            "constant_memory": True,
+                            "use_zip64": True,
+                            "in_memory": False,
+                        },
+                    )
+                    self.log_message.emit(
+                        f"Режим: экономия памяти (Constant Memory, {self.total_rows:,} строк)",
+                        QColor("blue"),
+                    )
                 self._init_formats(workbook)
 
             with open(input_file, "r", encoding=encoding, errors="replace") as f:
@@ -912,15 +934,29 @@ class TSVToExcelConverter(QThread):
                 if split_idx is not None:
                     if self.split_mode == "files":
                         self._convert_with_split_to_files(
-                            reader, headers, split_idx, filter_idx, base_name, os.path.basename(input_file),
+                            reader,
+                            headers,
+                            split_idx,
+                            filter_idx,
+                            base_name,
+                            os.path.basename(input_file),
                         )
                     else:
                         self._convert_with_split(
-                            workbook, reader, headers, split_idx, filter_idx, os.path.basename(input_file),
+                            workbook,
+                            reader,
+                            headers,
+                            split_idx,
+                            filter_idx,
+                            os.path.basename(input_file),
                         )
                 elif not split_to_files:
                     self._convert_without_split(
-                        workbook, reader, headers, filter_idx, os.path.basename(input_file),
+                        workbook,
+                        reader,
+                        headers,
+                        filter_idx,
+                        os.path.basename(input_file),
                     )
 
             if self.stop_flag:
@@ -1035,7 +1071,11 @@ class TSVToExcelConverter(QThread):
                 except Exception:
                     pass
 
-            if result != "success" and not split_to_files and os.path.exists(output_path):
+            if (
+                result != "success"
+                and not split_to_files
+                and os.path.exists(output_path)
+            ):
                 try:
                     os.remove(output_path)
                 except Exception:
@@ -1168,9 +1208,7 @@ class TSVToExcelConverter(QThread):
 
             current_row = sheet_row_counts[value]
             if current_row >= MAX_ROWS:
-                sheet_name = FileUtilities.sanitize_sheet_name(
-                    f"{value}_2", used_names
-                )
+                sheet_name = FileUtilities.sanitize_sheet_name(f"{value}_2", used_names)
                 ws, current_row = _create_sheet_with_headers(sheet_name)
                 worksheets[value] = ws
                 sheet_row_counts[value] = current_row
@@ -1202,6 +1240,7 @@ class TSVToExcelConverter(QThread):
         file_paths: Dict[str, str] = {}
         selected_vals = self.selected_values
         output_files: List[str] = []
+        use_ram_mode = self.total_rows <= self.ram_threshold
 
         def _create_workbook_for_value(value: str):
             """Создаёт новый workbook для значения."""
@@ -1212,9 +1251,12 @@ class TSVToExcelConverter(QThread):
             )
             file_paths[value] = file_path
 
-            workbook = xlsxwriter.Workbook(
-                file_path, {"constant_memory": True, "in_memory": False}
-            )
+            if use_ram_mode:
+                workbook = xlsxwriter.Workbook(file_path, {"in_memory": True})
+            else:
+                workbook = xlsxwriter.Workbook(
+                    file_path, {"constant_memory": True, "in_memory": False}
+                )
 
             header_format = workbook.add_format(
                 {

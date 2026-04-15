@@ -853,7 +853,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Настройки")
-        self.setMinimumSize(500, 220)
+        self.setMinimumSize(500, 280)
         self.setModal(True)
 
         # Применяем тему родителя если есть
@@ -904,9 +904,6 @@ class SettingsDialog(QDialog):
         self.theme_combo.addItems(["Светлая", "Тёмная"])
         layout.addWidget(self.theme_combo)
 
-        # Растягиваем комбобокс, но не даем ему быть бесконечным, если нужно
-        # В данном случае QHBoxLayout сам распределит место, или можно добавить stretch
-
         group.setLayout(layout)
         return group
 
@@ -934,6 +931,19 @@ class SettingsDialog(QDialog):
         self.auto_delete_checkbox = StyledCheckBox("Автоудаление исходного файла")
         layout.addWidget(self.auto_delete_checkbox)
 
+        # Порог для быстрой конвертации через RAM
+        ram_layout = QHBoxLayout()
+        ram_layout.addWidget(QLabel("Порог для быстрой конвертации (строк):"))
+        self.ram_threshold_spinbox = QSpinBox()
+        self.ram_threshold_spinbox.setRange(100000, 10000000)
+        self.ram_threshold_spinbox.setSingleStep(50000)
+        self.ram_threshold_spinbox.setValue(500000)
+        self.ram_threshold_spinbox.setMinimumWidth(120)
+        ram_layout.addWidget(self.ram_threshold_spinbox)
+        ram_layout.addWidget(QLabel("(меньше → быстрее)"))
+        ram_layout.addStretch()
+        layout.addLayout(ram_layout)
+
         group.setLayout(layout)
         return group
 
@@ -948,6 +958,7 @@ class SettingsDialog(QDialog):
             "default_path": self.default_path_edit.text(),
             "auto_open": self.auto_open_checkbox.isChecked(),
             "auto_delete": self.auto_delete_checkbox.isChecked(),
+            "ram_threshold": self.ram_threshold_spinbox.value(),
         }
 
     def load_settings(self, settings: Dict[str, Any]):
@@ -955,6 +966,7 @@ class SettingsDialog(QDialog):
         self.default_path_edit.setText(settings.get("default_path", ""))
         self.auto_open_checkbox.setChecked(settings.get("auto_open", False))
         self.auto_delete_checkbox.setChecked(settings.get("auto_delete", False))
+        self.ram_threshold_spinbox.setValue(settings.get("ram_threshold", 500000))
 
 
 class CheckBoxListWidget(QListWidget):
@@ -3142,6 +3154,7 @@ class MainWindow(QMainWindow):
             filter_column=filter_column,
             filter_values=filter_values,
             pivot_settings=self._pivot_settings,
+            ram_threshold=self._settings.get("ram_threshold", 500000),
         )
 
         # Сигнал для бизнес-логики

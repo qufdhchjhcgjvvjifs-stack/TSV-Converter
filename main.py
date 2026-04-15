@@ -88,6 +88,7 @@ class TSVConverterApp:
         default_path = self.settings.value("default_path", "")
         auto_open = self.settings.value("auto_open", "false") == "true"
         auto_delete = self.settings.value("auto_delete", "false") == "true"
+        ram_threshold = int(self.settings.value("ram_threshold", 500000))
 
         # Применяем к окну
         self.window._settings = {
@@ -95,6 +96,7 @@ class TSVConverterApp:
             "default_path": default_path,
             "auto_open": auto_open,
             "auto_delete": auto_delete,
+            "ram_threshold": ram_threshold,
         }
 
         if default_path:
@@ -113,6 +115,9 @@ class TSVConverterApp:
         )
         self.settings.setValue(
             "auto_delete", str(self.window._settings.get("auto_delete", False))
+        )
+        self.settings.setValue(
+            "ram_threshold", str(self.window._settings.get("ram_threshold", 500000))
         )
 
     # ========================================================================
@@ -324,6 +329,7 @@ class TSVConverterApp:
             filter_column=config.filter_column,
             filter_values=config.filter_values,
             pivot_settings=config.pivot_settings,
+            ram_threshold=config.ram_threshold,
         )
 
         # Подключаем сигналы
