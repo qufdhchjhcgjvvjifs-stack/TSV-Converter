@@ -884,26 +884,30 @@ class TSVToExcelConverter(QThread):
 
         workbook = None
         result = "error"
-        use_ram_mode = self.total_rows <= self.ram_threshold
+
+        # Определяем режим работы xlsxwriter:
+        # - < ram_threshold: быстрый режим (временные файлы, баланс скорости и памяти)
+        # - >= ram_threshold: constant_memory (минимум RAM, последовательная запись)
+        # НЕ используем in_memory: True из-за долгого сжатия в конце
+        use_constant_memory = self.total_rows >= self.ram_threshold
         try:
             if not split_to_files:
-                if use_ram_mode:
-                    workbook = xlsxwriter.Workbook(output_path, {"in_memory": True})
-                    self.log_message.emit(
-                        f"Режим: быстрая конвертация (RAM, {self.total_rows:,} строк)",
-                        QColor("blue"),
-                    )
-                else:
+                if use_constant_memory:
                     workbook = xlsxwriter.Workbook(
                         output_path,
                         {
                             "constant_memory": True,
                             "use_zip64": True,
-                            "in_memory": False,
                         },
                     )
                     self.log_message.emit(
                         f"Режим: экономия памяти (Constant Memory, {self.total_rows:,} строк)",
+                        QColor("blue"),
+                    )
+                else:
+                    workbook = xlsxwriter.Workbook(output_path)
+                    self.log_message.emit(
+                        f"Режим: быстрый (временные файлы, {self.total_rows:,} строк)",
                         QColor("blue"),
                     )
                 self._init_formats(workbook)
@@ -1067,17 +1071,17 @@ class TSVToExcelConverter(QThread):
 
         finally:
             if workbook is not None:
+                self._emit_progress_update(
+                    os.path.basename(input_file), "Сохранение файла...", force=True
+                )
                 try:
                     workbook.close()
                 except Exception:
                     pass
 
-            if use_ram_mode:
-                workbook = None
-                self._cached_formats = {}
-                gc.collect()
+            self._cached_formats = {}
 
-            if (
+        if (
                 result != "success"
                 and not split_to_files
                 and os.path.exists(output_path)
@@ -1246,7 +1250,8 @@ class TSVToExcelConverter(QThread):
         file_paths: Dict[str, str] = {}
         selected_vals = self.selected_values
         output_files: List[str] = []
-        use_ram_mode = self.total_rows <= self.ram_threshold
+
+        use_constant_memory = self.total_rows >= self.ram_threshold
 
         def _create_workbook_for_value(value: str):
             """Создаёт новый workbook для значения."""
@@ -1257,12 +1262,12 @@ class TSVToExcelConverter(QThread):
             )
             file_paths[value] = file_path
 
-            if use_ram_mode:
-                workbook = xlsxwriter.Workbook(file_path, {"in_memory": True})
-            else:
+            if use_constant_memory:
                 workbook = xlsxwriter.Workbook(
-                    file_path, {"constant_memory": True, "in_memory": False}
+                    file_path, {"constant_memory": True}
                 )
+            else:
+                workbook = xlsxwriter.Workbook(file_path)
 
             header_format = workbook.add_format(
                 {
@@ -1353,11 +1358,6 @@ class TSVToExcelConverter(QThread):
                 f"уникальных значений возможно превышение лимита открытых файлов ОС.",
                 QColor("orange"),
             )
-
-        if use_ram_mode:
-            open_workbooks.clear()
-            open_worksheets.clear()
-            gc.collect()
 
         self.output_file_path = self.output_directory
 
