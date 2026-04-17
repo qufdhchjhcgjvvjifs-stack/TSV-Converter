@@ -435,7 +435,9 @@ class TSVConverterApp:
         )
 
         # Подключаем сигналы
-        self.converter.update_progress.connect(self.window.progress_bar.setValue)
+        self.converter.progress_data.connect(
+            lambda data: self.window.progress_bar.setValue(data.percent)
+        )
         self.converter.progress_data.connect(self.window.update_progress_details)
         self.converter.log_message.connect(self._log_message)
         self.converter.finished_signal.connect(self._on_conversion_finished)

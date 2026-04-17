@@ -463,9 +463,9 @@ class TSVToExcelConverter(QThread):
         self.header_color = header_color
         self.split_column = split_column
         self.split_mode = split_mode
-        self.selected_values = selected_values or []
+        self.selected_values = set(selected_values) if selected_values else set()
         self.filter_column = filter_column
-        self.filter_values = filter_values or []
+        self.filter_values = set(filter_values) if filter_values else set()
         self.pivot_settings = pivot_settings
         self._timing = {}
         self._timing_total = 0.0
@@ -556,7 +556,7 @@ class TSVToExcelConverter(QThread):
             self.error.emit(str(e))
 
     def _get_split_value(
-        self, row: List[str], split_idx: int, selected_vals: List[str]
+        self, row: List[str], split_idx: int, selected_vals: Set[str]
     ) -> str:
         """Извлекает значение для разделения и применяет логику 'Остальные'."""
         value = row[split_idx] if split_idx < len(row) else ""
@@ -609,7 +609,7 @@ class TSVToExcelConverter(QThread):
             pct = (v / total_time * 100) if total_time > 0 else 0
             self.log_message.emit(f"  Файл #{file_idx + 1}: {v:.2f}s ({pct:.1f}%)", QColor("gray"))
 
-        # Детальные метрики последнего файла
+        # Детальные метрики по всем файлам
         detail_keys = ['create_workbook', 'close_workbook', 'Запись данных...']
         for k in detail_keys:
             if k in self._timing:
@@ -884,7 +884,7 @@ class TSVToExcelConverter(QThread):
                 input_file,
                 self.pivot_settings,
                 self.filter_column if self.filter_column != "Не фильтровать" else "",
-                self.filter_values or [],
+                self.filter_values,
             )
 
             if pivot_data:
@@ -896,7 +896,6 @@ class TSVToExcelConverter(QThread):
 
                     # Заголовки
                     row_headers = self.pivot_settings.get("rows", [])
-                    # col_headers - removed as unused
                     writer.writerow(row_headers + ["Колонка", "Метрика", "Значение"])
 
                     for row_key, col_dict in pivot_data.items():
@@ -933,14 +932,15 @@ class TSVToExcelConverter(QThread):
         base_name = self._build_output_base_name(input_file, file_index)
         output_path = os.path.join(self.output_directory, f"{base_name}.xlsx")
 
-        # Режим разделения на файлы — workbook не нужен
-        split_to_files = False
+        # Ожидаемый режим разделения на файлы
+        expected_split_to_files = False
         if self.split_column and self.split_column != "Не разделять":
             if self.split_mode == "files":
-                split_to_files = True
+                expected_split_to_files = True
 
         workbook = None
         result = "error"
+        actual_split_to_files = expected_split_to_files
 
         # Определяем режим работы xlsxwriter:
         # - < ram_threshold: быстрый режим (временные файлы, баланс скорости и памяти)
@@ -949,28 +949,6 @@ class TSVToExcelConverter(QThread):
         use_constant_memory = self.total_rows >= self.ram_threshold
         try:
             t_convert = time.time()
-            if not split_to_files:
-                t_create_wb = time.time()
-                if use_constant_memory:
-                    workbook = xlsxwriter.Workbook(
-                        output_path,
-                        {
-                            "constant_memory": True,
-                            "use_zip64": True,
-                        },
-                    )
-                    self.log_message.emit(
-                        f"Режим: экономия памяти (Constant Memory, {self.total_rows:,} строк)",
-                        QColor("blue"),
-                    )
-                else:
-                    workbook = xlsxwriter.Workbook(output_path)
-                    self.log_message.emit(
-                        f"Режим: быстрый (временные файлы, {self.total_rows:,} строк)",
-                        QColor("blue"),
-                    )
-                self._timing['create_workbook'] = time.time() - t_create_wb
-                self._init_formats(workbook)
 
             with open(input_file, "r", encoding=encoding, errors="replace") as f:
                 reader = csv.reader(f, delimiter=delimiter)
@@ -989,12 +967,44 @@ class TSVToExcelConverter(QThread):
                         split_idx = headers.index(self.split_column)
                     except ValueError:
                         split_idx = None
+                        self.log_message.emit(
+                            f"Столбец для разделения '{self.split_column}' не найден в файле. Разделение отменено.", 
+                            QColor("orange")
+                        )
 
                 if self.filter_column and self.filter_column != "Не фильтровать":
                     try:
                         filter_idx = headers.index(self.filter_column)
                     except ValueError:
                         filter_idx = None
+
+                # Корректируем флаг фактического разделения на файлы
+                if expected_split_to_files and split_idx is None:
+                    actual_split_to_files = False
+
+                # Создаём главный workbook, если мы НЕ разделяем на файлы (или если разделение отменилось)
+                if not actual_split_to_files:
+                    t_create_wb = time.time()
+                    if use_constant_memory:
+                        workbook = xlsxwriter.Workbook(
+                            output_path,
+                            {
+                                "constant_memory": True,
+                                "use_zip64": True,
+                            },
+                        )
+                        self.log_message.emit(
+                            f"Режим: экономия памяти (Constant Memory, {self.total_rows:,} строк)",
+                            QColor("blue"),
+                        )
+                    else:
+                        workbook = xlsxwriter.Workbook(output_path)
+                        self.log_message.emit(
+                            f"Режим: быстрый (временные файлы, {self.total_rows:,} строк)",
+                            QColor("blue"),
+                        )
+                    self._timing['create_workbook'] = self._timing.get('create_workbook', 0.0) + (time.time() - t_create_wb)
+                    self._init_formats(workbook)
 
                 if split_idx is not None:
                     if self.split_mode == "files":
@@ -1015,7 +1025,7 @@ class TSVToExcelConverter(QThread):
                             filter_idx,
                             os.path.basename(input_file),
                         )
-                elif not split_to_files:
+                else:
                     self._convert_without_split(
                         workbook,
                         reader,
@@ -1042,7 +1052,7 @@ class TSVToExcelConverter(QThread):
                             self.filter_column
                             if self.filter_column != "Не фильтровать"
                             else "",
-                            self.filter_values or [],
+                            self.filter_values,
                         )
 
                         if pivot_data:
@@ -1151,7 +1161,7 @@ class TSVToExcelConverter(QThread):
 
         if (
                 result != "success"
-                and not split_to_files
+                and not actual_split_to_files
                 and os.path.exists(output_path)
             ):
                 try:
@@ -1160,7 +1170,7 @@ class TSVToExcelConverter(QThread):
                     pass
 
         if result == "success":
-            if not split_to_files:
+            if not actual_split_to_files:
                 self.output_file_path = output_path
                 self.generated_files.append(output_path)
 
@@ -1349,7 +1359,7 @@ class TSVToExcelConverter(QThread):
 
             if use_constant_memory:
                 workbook = xlsxwriter.Workbook(
-                    file_path, {"constant_memory": True}
+                    file_path, {"constant_memory": True, "use_zip64": True}
                 )
             else:
                 workbook = xlsxwriter.Workbook(file_path)
@@ -1516,7 +1526,7 @@ class PivotTableProcessor:
         file_path: str,
         settings: Dict[str, Any],
         filter_column: str = "",
-        filter_values: List[str] = None,
+        filter_values: Set[str] = None,
     ) -> Optional[Dict]:
         """
         Создаёт данные для сводной таблицы.
