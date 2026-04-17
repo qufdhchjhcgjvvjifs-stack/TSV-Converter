@@ -7,6 +7,7 @@ import sys
 import os
 import csv
 from datetime import datetime
+from collections import defaultdict
 
 from PySide6.QtWidgets import QApplication, QMessageBox, QFileDialog, QDialog
 from PySide6.QtCore import QTimer, QSettings, Qt, QUrl
@@ -198,6 +199,89 @@ class TSVConverterApp:
                 pass
         return total
 
+    @staticmethod
+    def _count_split_distribution_task(files, split_col, selected_values, filter_col, filter_values_dict):
+        """Фоновая задача подсчета распределения строк по значениям разделения."""
+        counts = defaultdict(int)
+        selected_set = set(selected_values)
+        
+        filter_vals = None
+        if filter_col and filter_col != "Не фильтровать":
+            filter_vals = set(filter_values_dict.get(filter_col, []))
+
+        for file_path in files:
+            try:
+                encoding = FileUtilities.get_encoding(file_path)
+                delimiter = FileUtilities.get_delimiter(file_path)
+
+                with open(file_path, "r", encoding=encoding, errors="replace") as f:
+                    reader = csv.reader(f, delimiter=delimiter)
+                    try:
+                        headers = next(reader)
+                        if split_col not in headers:
+                            continue
+                            
+                        split_idx = headers.index(split_col)
+                        
+                        filter_idx = None
+                        if filter_vals:
+                            try:
+                                filter_idx = headers.index(filter_col)
+                            except ValueError:
+                                filter_idx = None
+                        
+                        for row in reader:
+                            # Фильтр
+                            if filter_idx is not None:
+                                if filter_idx < len(row) and row[filter_idx] not in filter_vals:
+                                    continue
+                            
+                            # Разделение
+                            val = row[split_idx] if split_idx < len(row) else ""
+                            if not val or not val.strip():
+                                continue
+                                
+                            if selected_set and val not in selected_set:
+                                counts["Остальные"] += 1
+                            else:
+                                counts[val] += 1
+                                
+                    except (ValueError, StopIteration):
+                        continue
+            except (OSError, IOError, UnicodeDecodeError):
+                pass
+        return dict(counts)
+
+    def _on_split_distribution_calculated(self, counts, column, mode):
+        """Обработчик завершения подсчета распределения."""
+        self.window._hide_loading_overlay()
+        
+        if not counts:
+            self._log_message(f"Анализ разделения: нет данных для распределения", QColor("orange"))
+            return
+            
+        mode_text = "Разделение по отдельным файлам" if mode == "files" else "Разделение по листам одного файла"
+        
+        self._log_message(f"=== Прогноз разделения (Колонка: {column}) ===", QColor("cyan"))
+        self._log_message(f"Режим: {mode_text}", QColor("blue"))
+        
+        total_rows = 0
+        idx = 1
+        for val, count in sorted(counts.items(), key=lambda x: x[1], reverse=True):
+            self._log_message(f"{idx}. {val}: {count:,} строк", QColor("gray"))
+            total_rows += count
+            idx += 1
+            
+        item_type = "файлов" if mode == "files" else "листов"
+        self._log_message("-" * 40, QColor("cyan"))
+        self._log_message(f"Итого будет создано {item_type}: {len(counts)}", QColor("blue"))
+        self._log_message(f"Всего строк к распределению: {total_rows:,}", QColor("blue"))
+
+    def _on_split_distribution_error(self, error):
+        """Обработчик ошибки подсчета распределения."""
+        self.window._hide_loading_overlay()
+        self._log_message(f"Ошибка анализа распределения: {error}", QColor("red"))
+
     def _on_split_column_selected(self, index: int):
         """Обработчик выбора столбца для разделения."""
         if index <= 0:
@@ -210,7 +294,7 @@ class TSVConverterApp:
         try:
             # Получаем текущий фильтр
             filter_col = self.window.filter_column_combo.currentText()
-            filter_vals = (
+            filter_vals_list = (
                 list(self.window._filter_values.get(filter_col, []))
                 if filter_col != "Не фильтровать"
                 else []
@@ -226,17 +310,35 @@ class TSVConverterApp:
                 file_paths=file_paths,
                 column=column,
                 filter_column=filter_col,
-                filter_values=filter_vals,
+                filter_values=filter_vals_list,
             )
 
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 selected = dialog.get_selected_values()
+                mode = dialog.get_split_mode()
                 self.window._selected_column_values[column] = selected
-                self.window._split_modes[column] = dialog.get_split_mode()
-                self._log_message(
-                    f"Выбраны значения для разделения: {', '.join(selected[:5])}...",
-                    QColor("green"),
+                self.window._split_modes[column] = mode
+                
+                # Показываем лоадер на главном окне
+                self.window._show_loading_overlay("Анализ распределения данных...")
+                
+                # Запускаем подсчет
+                worker = LoadingWorker(
+                    self._count_split_distribution_task,
+                    file_paths, column, selected, filter_col, self.window._filter_values
                 )
+                
+                worker.finished.connect(
+                    lambda counts: self._on_split_distribution_calculated(counts, column, mode)
+                )
+                worker.error.connect(
+                    lambda err: self._on_split_distribution_error(err)
+                )
+                
+                # Очищаем и сохраняем воркера
+                self._active_workers = [w for w in self._active_workers if w.isRunning()]
+                self._active_workers.append(worker)
+                worker.start()
             else:
                 self.window.split_column_combo.setCurrentIndex(0)
 
