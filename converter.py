@@ -467,10 +467,13 @@ class TSVToExcelConverter(QThread):
         self.filter_column = filter_column
         self.filter_values = filter_values or []
         self.pivot_settings = pivot_settings
+        self._timing = {}
+        self._timing_total = 0.0
         self.ram_threshold = ram_threshold
 
         self.stop_flag = False
         self.output_file_path: Optional[str] = None
+        self.generated_files: List[str] = []
         self.total_rows = 0
         self.processed_rows = 0
 
@@ -485,6 +488,9 @@ class TSVToExcelConverter(QThread):
         try:
             self.log_message.emit("Начало конвертации...", QColor("blue"))
             self.processed_rows = 0
+            self._timing = {}
+            self._timing_total = 0.0
+            self.generated_files = []
 
             # Валидация
             if not self.input_files:
@@ -494,7 +500,9 @@ class TSVToExcelConverter(QThread):
                 raise ValueError(f"Директория не существует: {self.output_directory}")
 
             # Подсчёт общего количества строк
+            t0 = time.time()
             self._count_total_rows()
+            self._timing['count_rows'] = time.time() - t0
 
             if self.stop_flag:
                 self._finish_as_stopped()
@@ -516,7 +524,11 @@ class TSVToExcelConverter(QThread):
                     os.path.basename(tsv_file), "Чтение файла...", force=True
                 )
 
+                t_file_start = time.time()
                 conversion_result = self._convert_file(tsv_file, processed)
+                t_file_elapsed = time.time() - t_file_start
+                self._timing[f'convert_file_{processed}'] = t_file_elapsed
+
                 if conversion_result == "success":
                     processed += 1
                 elif conversion_result == "stopped":
@@ -527,6 +539,11 @@ class TSVToExcelConverter(QThread):
                         f"Ошибка обработки файла: {os.path.basename(tsv_file)}",
                         QColor("red"),
                     )
+
+            # Финальный отчёт
+            total_time = time.time() - t0
+            self._timing_total = total_time
+            self._log_timing_summary(total_time)
 
             self.log_message.emit(
                 f"Конвертация завершена. Обработано файлов: {processed}",
@@ -572,6 +589,42 @@ class TSVToExcelConverter(QThread):
         progress_data.current_operation = current_operation
         self.progress_data.emit(progress_data)
         self.update_progress.emit(progress_data.percent)
+
+    def _log_timing_summary(self, total_time: float):
+        """Логирует сводку времени конвертации."""
+        self.log_message.emit("=== Профилирование ===", QColor("cyan"))
+
+        # Основные этапы
+        if 'count_rows' in self._timing:
+            self.log_message.emit(f"Подсчёт строк: {self._timing['count_rows']:.2f}s", QColor("gray"))
+
+        # Детали файловых конверсий
+        file_times = []
+        for k, v in sorted(self._timing.items()):
+            if k.startswith('convert_file_'):
+                file_idx = int(k.split('_')[-1]) if '_' in k else 0
+                file_times.append((file_idx, k, v))
+
+        for file_idx, k, v in sorted(file_times):
+            pct = (v / total_time * 100) if total_time > 0 else 0
+            self.log_message.emit(f"  Файл #{file_idx + 1}: {v:.2f}s ({pct:.1f}%)", QColor("gray"))
+
+        # Детальные метрики последнего файла
+        detail_keys = ['create_workbook', 'close_workbook', 'Запись данных...']
+        for k in detail_keys:
+            if k in self._timing:
+                v = self._timing[k]
+                pct = (v / total_time * 100) if total_time > 0 else 0
+                self.log_message.emit(f"  {k}: {v:.2f}s ({pct:.1f}%)", QColor("gray"))
+
+        # Суммарное время закрытия всех файлов
+        if 'close_workbook_total' in self._timing:
+            v = self._timing['close_workbook_total']
+            pct = (v / total_time * 100) if total_time > 0 else 0
+            self.log_message.emit(f"  Суммарное закрытие файлов: {v:.2f}s ({pct:.1f}%)", QColor("red"))
+
+        if total_time > 0:
+            self.log_message.emit(f"Общее время: {total_time:.2f}s", QColor("blue"))
 
     def _count_total_rows(self):
         """Подсчитывает общее количество строк для прогресс-бара."""
@@ -747,6 +800,7 @@ class TSVToExcelConverter(QThread):
             )
 
         self.output_file_path = output_path
+        self.generated_files.append(output_path)
 
     def _write_split_csv(self, reader, headers, base_name, split_idx, filter_idx):
         MAX_OPEN_FILES = 200
@@ -819,6 +873,9 @@ class TSVToExcelConverter(QThread):
             )
 
         self.output_file_path = self.output_directory
+        for path in file_paths.values():
+            if path not in files_to_remove:
+                self.generated_files.append(path)
 
     def _create_csv_pivot(self, input_file, base_name):
         try:
@@ -891,7 +948,9 @@ class TSVToExcelConverter(QThread):
         # НЕ используем in_memory: True из-за долгого сжатия в конце
         use_constant_memory = self.total_rows >= self.ram_threshold
         try:
+            t_convert = time.time()
             if not split_to_files:
+                t_create_wb = time.time()
                 if use_constant_memory:
                     workbook = xlsxwriter.Workbook(
                         output_path,
@@ -910,6 +969,7 @@ class TSVToExcelConverter(QThread):
                         f"Режим: быстрый (временные файлы, {self.total_rows:,} строк)",
                         QColor("blue"),
                     )
+                self._timing['create_workbook'] = time.time() - t_create_wb
                 self._init_formats(workbook)
 
             with open(input_file, "r", encoding=encoding, errors="replace") as f:
@@ -1023,6 +1083,7 @@ class TSVToExcelConverter(QThread):
                                     f"Сводная таблица: {os.path.basename(pivot_output_path)}",
                                     QColor("green"),
                                 )
+                                self.generated_files.append(pivot_output_path)
                             else:
                                 # Сводная в текущий workbook
                                 header_format = workbook.add_format(
@@ -1074,12 +1135,19 @@ class TSVToExcelConverter(QThread):
                 self._emit_progress_update(
                     os.path.basename(input_file), "Сохранение файла...", force=True
                 )
+                t_close = time.time()
                 try:
                     workbook.close()
                 except Exception:
                     pass
+                cw_time = time.time() - t_close
+                self._timing['close_workbook'] = cw_time
+                self._timing['close_workbook_total'] = self._timing.get('close_workbook_total', 0) + cw_time
 
             self._cached_formats = {}
+
+            # Record overall conversion time
+            self._timing['conversion_total'] = time.time() - t_convert
 
         if (
                 result != "success"
@@ -1094,6 +1162,7 @@ class TSVToExcelConverter(QThread):
         if result == "success":
             if not split_to_files:
                 self.output_file_path = output_path
+                self.generated_files.append(output_path)
 
                 elapsed = time.time() - start_time
                 minutes = int(elapsed // 60)
@@ -1155,6 +1224,7 @@ class TSVToExcelConverter(QThread):
         operation_name: str = "Запись данных...",
     ):
         """Обрабатывает строки с фильтрацией, остановкой и обновлением прогресса."""
+        t_process = time.time()
         update_freq = max(1, self.total_rows // 100)
 
         if filter_idx is not None and self.filter_values:
@@ -1181,6 +1251,7 @@ class TSVToExcelConverter(QThread):
                     self._emit_progress_update(current_file, operation_name)
 
         self._emit_progress_update(current_file, operation_name, force=True)
+        self._timing[operation_name] = time.time() - t_process
 
     def _convert_with_split(
         self,
@@ -1253,8 +1324,22 @@ class TSVToExcelConverter(QThread):
 
         use_constant_memory = self.total_rows >= self.ram_threshold
 
+        if use_constant_memory:
+            self.log_message.emit(
+                f"Режим разделения: экономия памяти (Constant Memory, {self.total_rows:,} строк)",
+                QColor("blue"),
+            )
+        else:
+            self.log_message.emit(
+                f"Режим разделения: быстрый (временные файлы, {self.total_rows:,} строк)",
+                QColor("blue"),
+            )
+
+        self._timing['create_workbook'] = 0.0
+
         def _create_workbook_for_value(value: str):
             """Создаёт новый workbook для значения."""
+            t_create = time.time()
             safe_value = FileUtilities.sanitize_file_stem(value, used_file_names)
             sheet_name = FileUtilities.sanitize_sheet_name(safe_value, used_file_names)
             file_path = os.path.join(
@@ -1303,6 +1388,7 @@ class TSVToExcelConverter(QThread):
             workbook._tsv_cell_format = cell_format
 
             output_files.append(file_path)
+            self._timing['create_workbook'] += time.time() - t_create
 
         def process_row(row):
             value = self._get_split_value(row, split_idx, selected_vals)
@@ -1323,12 +1409,18 @@ class TSVToExcelConverter(QThread):
 
         self._process_rows_with_progress(reader, filter_idx, current_file, process_row)
 
+        self._emit_progress_update(current_file, "Сохранение файлов...", force=True)
+        t_close_start = time.time()
         # Закрываем все workbook
         for value, wb in open_workbooks.items():
             try:
                 wb.close()
             except Exception:
                 pass
+
+        t_close = time.time() - t_close_start
+        self._timing['close_workbook'] = t_close
+        self._timing['close_workbook_total'] = self._timing.get('close_workbook_total', 0) + t_close
 
         # Удаляем файлы без данных (только заголовок)
         # row_count = 1 означает только заголовок, без строк данных
@@ -1360,6 +1452,7 @@ class TSVToExcelConverter(QThread):
             )
 
         self.output_file_path = self.output_directory
+        self.generated_files.extend(output_files)
 
     def _convert_without_split(
         self,

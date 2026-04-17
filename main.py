@@ -529,22 +529,50 @@ class TSVConverterApp:
                 msgbox.exec()
 
     def _delete_converted_file(self):
-        """Удаляет сконвертированный файл."""
-        if self.converter and hasattr(self.converter, "output_file_path"):
+        """Удаляет сконвертированные файлы."""
+        if not self.converter:
+            return
+
+        files_to_delete = []
+        if hasattr(self.converter, "generated_files") and self.converter.generated_files:
+            files_to_delete = [f for f in self.converter.generated_files if os.path.exists(f)]
+        elif hasattr(self.converter, "output_file_path") and self.converter.output_file_path:
             path = self.converter.output_file_path
-            if path and os.path.exists(path):
-                msgbox = self._show_message_box(
-                    QMessageBox.Icon.Question,
-                    "Подтверждение",
-                    "Удалить файл?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                )
-                reply = msgbox.exec()
-                if reply == QMessageBox.StandardButton.Yes:
+            if path and os.path.isfile(path):
+                files_to_delete = [path]
+
+        if not files_to_delete:
+            return
+
+        msg_text = (
+            f"Удалить сгенерированные файлы ({len(files_to_delete)} шт.)?"
+            if len(files_to_delete) > 1
+            else "Удалить сгенерированный файл?"
+        )
+        
+        msgbox = self._show_message_box(
+            QMessageBox.Icon.Question,
+            "Подтверждение",
+            msg_text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        reply = msgbox.exec()
+
+        if reply == QMessageBox.StandardButton.Yes:
+            deleted_count = 0
+            for path in files_to_delete:
+                try:
                     os.remove(path)
-                    self.window.open_file_btn.setEnabled(False)
-                    self.window.delete_file_btn.setEnabled(False)
-                    self._log_message("Файл удалён", QColor("red"))
+                    deleted_count += 1
+                except Exception as e:
+                    self._log_message(f"Ошибка удаления файла {os.path.basename(path)}: {str(e)}", QColor("red"))
+
+            self.window.open_file_btn.setEnabled(False)
+            self.window.delete_file_btn.setEnabled(False)
+            
+            if deleted_count > 0:
+                msg = f"Удалено файлов: {deleted_count}" if deleted_count > 1 else "Файл удалён"
+                self._log_message(msg, QColor("red"))
 
     def _export_report(self):
         """Экспортирует отчёт в HTML."""
