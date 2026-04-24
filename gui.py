@@ -1381,6 +1381,165 @@ class ColumnValuesDialog(QDialog):
         return "files" if self.split_files_checkbox.isChecked() else "sheets"
 
 
+class ColumnSelectionDialog(QDialog):
+    """
+    Диалог выбора итоговых столбцов и их порядка.
+    Состояние хранится в QListWidgetItem, чтобы порядок не ломал чекбоксы.
+    """
+
+    def __init__(
+        self,
+        headers: List[str],
+        selected_columns: Optional[List[str]] = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Столбцы вывода")
+        self.setMinimumSize(460, 560)
+        self.setModal(True)
+
+        self._headers = list(headers)
+        self._selected_columns = selected_columns or list(headers)
+        self._is_dark = False
+        if parent and hasattr(parent, "_is_dark_theme"):
+            self._is_dark = parent._is_dark_theme
+
+        self._init_ui()
+        apply_theme_to_dialog(self, self._is_dark)
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        hint_label = QLabel(
+            "Отметьте столбцы, которые нужно оставить. "
+            "Перетащите строки вверх или вниз, чтобы изменить порядок."
+        )
+        hint_label.setWordWrap(True)
+        layout.addWidget(hint_label)
+
+        self.column_list = QListWidget()
+        self.column_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.column_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.column_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.column_list.setDragEnabled(True)
+        self.column_list.viewport().setAcceptDrops(True)
+        self.column_list.setDropIndicatorShown(True)
+        self.column_list.itemChanged.connect(self._update_info)
+        layout.addWidget(self.column_list)
+
+        self._load_columns()
+
+        self.info_label = QLabel()
+        layout.addWidget(self.info_label)
+
+        button_layout = QHBoxLayout()
+
+        select_all_btn = SecondaryButton("Выбрать все")
+        select_all_btn.clicked.connect(self._select_all)
+        button_layout.addWidget(select_all_btn)
+
+        clear_all_btn = SecondaryButton("Снять все")
+        clear_all_btn.clicked.connect(self._clear_all)
+        button_layout.addWidget(clear_all_btn)
+
+        reset_order_btn = SecondaryButton("Сбросить порядок")
+        reset_order_btn.clicked.connect(self._reset_order)
+        button_layout.addWidget(reset_order_btn)
+
+        button_layout.addStretch()
+
+        ok_btn = PrimaryButton("OK")
+        ok_btn.clicked.connect(self._validate_and_accept)
+        button_layout.addWidget(ok_btn)
+
+        cancel_btn = SecondaryButton("Отмена")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+
+        layout.addLayout(button_layout)
+        self._update_info()
+
+    def _load_columns(self):
+        """Загружает столбцы в список с сохранением выбранного порядка."""
+        self.column_list.blockSignals(True)
+        self.column_list.clear()
+
+        ordered_columns = []
+        for column in self._selected_columns:
+            if column in self._headers and column not in ordered_columns:
+                ordered_columns.append(column)
+
+        for column in self._headers:
+            if column not in ordered_columns:
+                ordered_columns.append(column)
+
+        selected_set = set(self._selected_columns)
+        for column in ordered_columns:
+            item = QListWidgetItem(column)
+            item.setFlags(
+                item.flags()
+                | Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsDragEnabled
+                | Qt.ItemFlag.ItemIsDropEnabled
+            )
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if column in selected_set
+                else Qt.CheckState.Unchecked
+            )
+            item.setData(Qt.ItemDataRole.UserRole, column)
+            self.column_list.addItem(item)
+
+        self.column_list.blockSignals(False)
+
+    def _select_all(self):
+        for row in range(self.column_list.count()):
+            self.column_list.item(row).setCheckState(Qt.CheckState.Checked)
+        self._update_info()
+
+    def _clear_all(self):
+        for row in range(self.column_list.count()):
+            self.column_list.item(row).setCheckState(Qt.CheckState.Unchecked)
+        self._update_info()
+
+    def _reset_order(self):
+        selected = set(self.get_selected_columns())
+        self._selected_columns = [column for column in self._headers if column in selected]
+        self._load_columns()
+        self._update_info()
+
+    def _update_info(self):
+        selected_count = len(self.get_selected_columns())
+        self.info_label.setText(
+            f"Выбрано столбцов: {selected_count} из {len(self._headers)}"
+        )
+
+    def _validate_and_accept(self):
+        if not self.get_selected_columns():
+            msgbox = QMessageBox(
+                QMessageBox.Icon.Warning,
+                "Предупреждение",
+                "Выберите хотя бы один столбец для вывода",
+                QMessageBox.StandardButton.Ok,
+                self,
+            )
+            apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
+            msgbox.exec()
+            return
+        self.accept()
+
+    def get_selected_columns(self) -> List[str]:
+        """Возвращает выбранные столбцы в текущем порядке списка."""
+        columns = []
+        for row in range(self.column_list.count()):
+            item = self.column_list.item(row)
+            if item.checkState() == Qt.CheckState.Checked:
+                columns.append(item.data(Qt.ItemDataRole.UserRole))
+        return columns
+
+
 class PivotSettingsDialog(QDialog):
     """
     Диалог настроек сводной таблицы.
@@ -2490,6 +2649,7 @@ class MainWindow(QMainWindow):
     delete_converted_file_requested = Signal()
     export_report_requested = Signal()
     settings_saved = Signal(dict)
+    columns_changed = Signal()
 
     def __init__(self):
         super().__init__()
@@ -2506,6 +2666,8 @@ class MainWindow(QMainWindow):
         self._selected_column_values: Dict[str, List[str]] = {}
         self._split_modes: Dict[str, str] = {}  # column -> "sheets" или "files"
         self._pivot_settings: Optional[Dict[str, Any]] = None
+        self._available_headers: List[str] = []
+        self._selected_output_columns: List[str] = []
 
         # Для обновления прогресса
 
@@ -2735,6 +2897,16 @@ class MainWindow(QMainWindow):
 
         styles_layout.addStretch()
         layout.addLayout(styles_layout, 2, 0, 1, 5)
+
+        # Строка 4: выбор итоговых столбцов
+        layout.addWidget(QLabel("Столбцы вывода:"), 3, 0)
+        self.columns_btn = SecondaryButton("Настроить...")
+        self.columns_btn.clicked.connect(self._show_column_selection)
+        self.columns_btn.setEnabled(False)
+        layout.addWidget(self.columns_btn, 3, 1)
+
+        self.columns_info_label = QLabel("Недоступно")
+        layout.addWidget(self.columns_info_label, 3, 2, 1, 3)
 
         return widget
 
@@ -2982,21 +3154,79 @@ class MainWindow(QMainWindow):
         # Сохраняем текущие значения
         current_split = self.split_column_combo.currentText()
         current_filter = self.filter_column_combo.currentText()
+        self._available_headers = list(headers)
+
+        if headers:
+            existing_selected = [
+                column for column in self._selected_output_columns if column in headers
+            ]
+            new_columns = [column for column in headers if column not in existing_selected]
+            self._selected_output_columns = existing_selected + new_columns
+        else:
+            self._selected_output_columns = []
+
+        combo_headers = self._get_active_output_columns()
 
         # Очищаем
+        self.split_column_combo.blockSignals(True)
+        self.filter_column_combo.blockSignals(True)
         self.split_column_combo.clear()
         self.filter_column_combo.clear()
 
         self.split_column_combo.addItem("Не разделять")
         self.filter_column_combo.addItem("Не фильтровать")
-        self.split_column_combo.addItems(headers)
-        self.filter_column_combo.addItems(headers)
+        self.split_column_combo.addItems(combo_headers)
+        self.filter_column_combo.addItems(combo_headers)
 
         # Восстанавливаем значения если возможно
-        if current_split in headers:
+        if current_split in combo_headers:
             self.split_column_combo.setCurrentText(current_split)
-        if current_filter in headers:
+        if current_filter in combo_headers:
             self.filter_column_combo.setCurrentText(current_filter)
+        self.split_column_combo.blockSignals(False)
+        self.filter_column_combo.blockSignals(False)
+
+        if hasattr(self, "columns_btn"):
+            self.columns_btn.setEnabled(self.file_list.count() == 1 and bool(headers))
+        self._update_columns_info()
+
+    def _get_active_output_columns(self) -> List[str]:
+        """Возвращает столбцы, доступные для дальнейших настроек вывода."""
+        if self.file_list.count() == 1 and self._selected_output_columns:
+            return list(self._selected_output_columns)
+        return list(self._available_headers)
+
+    def _sync_column_dependent_settings(self):
+        """Синхронизирует split/filter/pivot после изменения набора столбцов."""
+        active_columns = self._get_active_output_columns()
+        current_split = self.split_column_combo.currentText()
+        current_filter = self.filter_column_combo.currentText()
+
+        self.split_column_combo.blockSignals(True)
+        self.filter_column_combo.blockSignals(True)
+        self.split_column_combo.clear()
+        self.filter_column_combo.clear()
+        self.split_column_combo.addItem("Не разделять")
+        self.filter_column_combo.addItem("Не фильтровать")
+        self.split_column_combo.addItems(active_columns)
+        self.filter_column_combo.addItems(active_columns)
+
+        if current_split in active_columns:
+            self.split_column_combo.setCurrentText(current_split)
+        else:
+            self._selected_column_values.pop(current_split, None)
+            self._split_modes.pop(current_split, None)
+
+        if current_filter in active_columns:
+            self.filter_column_combo.setCurrentText(current_filter)
+        else:
+            self._filter_values.pop(current_filter, None)
+
+        self.split_column_combo.blockSignals(False)
+        self.filter_column_combo.blockSignals(False)
+
+        # Существующие настройки сводной могут ссылаться на исключённые столбцы.
+        self._pivot_settings = None
 
     def _on_files_processing_error(self, error: str):
         """Обработчик ошибки обработки файлов."""
@@ -3031,11 +3261,19 @@ class MainWindow(QMainWindow):
                 "Функция недоступна при загрузке нескольких файлов. "
                 "Split/filter работает только для одного файла."
             )
+            self.columns_btn.setEnabled(False)
+            self.columns_btn.setToolTip(
+                "Функция доступна только при загрузке одного файла."
+            )
         else:
             self.split_column_combo.setEnabled(True)
             self.filter_column_combo.setEnabled(True)
             self.split_column_combo.setToolTip("")
             self.filter_column_combo.setToolTip("")
+            self.columns_btn.setEnabled(file_count == 1 and bool(self._available_headers))
+            self.columns_btn.setToolTip("")
+
+        self._update_columns_info()
 
     def _remove_selected_file(self):
         """Удаление выбранного файла."""
@@ -3058,6 +3296,8 @@ class MainWindow(QMainWindow):
                     pass
 
             self._update_split_filter_state()
+            if self.file_list.count() == 0:
+                self._update_column_combos([])
             self.log_message("Файл удалён из списка", QColor("orange"))
 
     def _preview_file(self):
@@ -3084,6 +3324,47 @@ class MainWindow(QMainWindow):
                 pal = self.header_color_btn.palette()
                 pal.setColor(QPalette.ColorRole.Button, color)
                 self.header_color_btn.setPalette(pal)
+
+    def _show_column_selection(self):
+        """Открывает диалог выбора итоговых столбцов."""
+        if self.file_list.count() != 1 or not self._available_headers:
+            msgbox = self._show_message_box(
+                QMessageBox.Icon.Warning,
+                "Предупреждение",
+                "Настройка столбцов доступна только для одного добавленного файла",
+            )
+            msgbox.exec()
+            return
+
+        dialog = ColumnSelectionDialog(
+            self._available_headers,
+            self._selected_output_columns,
+            self,
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._selected_output_columns = dialog.get_selected_columns()
+            self._sync_column_dependent_settings()
+            self._update_columns_info()
+            self.log_message(
+                f"Выбрано столбцов вывода: {len(self._selected_output_columns)} из {len(self._available_headers)}",
+                QColor("green"),
+            )
+            self.columns_changed.emit()
+
+    def _update_columns_info(self):
+        """Обновляет статус выбранных столбцов."""
+        if not hasattr(self, "columns_info_label"):
+            return
+
+        file_count = self.file_list.count() if hasattr(self, "file_list") else 0
+        if file_count != 1 or not self._available_headers:
+            self.columns_info_label.setText("Недоступно")
+            return
+
+        selected_count = len(self._selected_output_columns) or len(self._available_headers)
+        self.columns_info_label.setText(
+            f"Столбцов: {selected_count} из {len(self._available_headers)}"
+        )
 
     def _start_conversion(self):
         """Запуск конвертации."""
@@ -3139,6 +3420,7 @@ class MainWindow(QMainWindow):
             if filter_column != "Не фильтровать"
             else []
         )
+        selected_columns = self._selected_output_columns if len(files) == 1 else []
 
         config = ConversionConfig(
             input_files=files,
@@ -3154,6 +3436,8 @@ class MainWindow(QMainWindow):
             filter_column=filter_column,
             filter_values=filter_values,
             pivot_settings=self._pivot_settings,
+            selected_columns=selected_columns,
+            deduplicate_rows=True,
             ram_threshold=self._settings.get("ram_threshold", 500000),
         )
 

@@ -72,6 +72,7 @@ class TSVConverterApp:
 
         # Сигналы
         self.window.settings_saved.connect(self._on_settings_saved)
+        self.window.columns_changed.connect(self._on_columns_changed)
 
         # Комбобоксы
         self.window.split_column_combo.currentIndexChanged.connect(
@@ -146,14 +147,19 @@ class TSVConverterApp:
 
         filter_col = self.window.filter_column_combo.currentText()
         filter_values = dict(self.window._filter_values)
+        selected_columns = (
+            list(self.window._selected_output_columns) if len(files) == 1 else []
+        )
 
         # Обновляем UI
         self.window.total_rows_label.setText("Строк: Подсчет...")
 
         # Запускаем в отдельном потоке
-        worker = LoadingWorker(self._count_rows_task, files, filter_col, filter_values)
+        worker = LoadingWorker(
+            self._count_rows_task, files, filter_col, filter_values, selected_columns
+        )
         worker.finished.connect(
-            lambda total: self.window.total_rows_label.setText(f"Строк: {total}")
+            lambda total: self.window.total_rows_label.setText(f"Строк: {total:,}")
         )
         worker.error.connect(
             lambda err: self._log_message(
@@ -169,8 +175,9 @@ class TSVConverterApp:
         worker.start()
 
     @staticmethod
-    def _count_rows_task(files, filter_col, filter_values):
+    def _count_rows_task(files, filter_col, filter_values, selected_columns=None):
         """Фоновая задача подсчета строк."""
+        selected_columns = selected_columns or []
         total = 0
         for file_path in files:
             try:
@@ -179,31 +186,69 @@ class TSVConverterApp:
 
                 filter_idx = None
                 filter_vals = None
+                output_indices = None
+                seen_rows = set()
 
-                if filter_col and filter_col != "Не фильтровать":
-                    with open(file_path, "r", encoding=encoding, errors="replace") as f:
-                        reader = csv.reader(f, delimiter=delimiter)
-                        headers = next(reader)
+                with open(file_path, "r", encoding=encoding, errors="replace") as f:
+                    reader = csv.reader(f, delimiter=delimiter)
+                    headers = next(reader, [])
+
+                    if filter_col and filter_col != "Не фильтровать":
                         try:
                             filter_idx = headers.index(filter_col)
                             filter_vals = set(filter_values.get(filter_col, []))
                         except ValueError:
                             filter_idx = None
 
-                count = FileUtilities.count_rows(
-                    file_path, delimiter, encoding, filter_idx, filter_vals
-                )
-                if count > 0:
-                    total += count
+                    if selected_columns and len(selected_columns) < len(headers):
+                        header_to_index = {}
+                        for index, header in enumerate(headers):
+                            if header not in header_to_index:
+                                header_to_index[header] = index
+                        output_indices = [
+                            header_to_index[column]
+                            for column in selected_columns
+                            if column in header_to_index
+                        ]
+
+                    for row in reader:
+                        if filter_idx is not None and filter_vals:
+                            if filter_idx >= len(row) or row[filter_idx] not in filter_vals:
+                                continue
+
+                        if output_indices:
+                            row_key = tuple(
+                                row[index] if index < len(row) else ""
+                                for index in output_indices
+                            )
+                            if row_key in seen_rows:
+                                continue
+                            seen_rows.add(row_key)
+
+                        total += 1
             except (OSError, IOError, UnicodeDecodeError):
                 pass
         return total
 
+    def _on_columns_changed(self):
+        """Обновляет зависящие от состава столбцов данные."""
+        self._update_total_rows()
+        self._update_pivot_settings_filter()
+
     @staticmethod
-    def _count_split_distribution_task(files, split_col, selected_values, filter_col, filter_values_dict):
+    def _count_split_distribution_task(
+        files,
+        split_col,
+        selected_values,
+        filter_col,
+        filter_values_dict,
+        selected_columns=None,
+    ):
         """Фоновая задача подсчета распределения строк по значениям разделения."""
         counts = defaultdict(int)
         selected_set = set(selected_values)
+        selected_columns = selected_columns or []
+        seen_rows_by_split = defaultdict(set)
         
         filter_vals = None
         if filter_col and filter_col != "Не фильтровать":
@@ -222,6 +267,17 @@ class TSVConverterApp:
                             continue
                             
                         split_idx = headers.index(split_col)
+                        output_indices = None
+                        if selected_columns and len(selected_columns) < len(headers):
+                            header_to_index = {}
+                            for index, header in enumerate(headers):
+                                if header not in header_to_index:
+                                    header_to_index[header] = index
+                            output_indices = [
+                                header_to_index[column]
+                                for column in selected_columns
+                                if column in header_to_index
+                            ]
                         
                         filter_idx = None
                         if filter_vals:
@@ -242,9 +298,20 @@ class TSVConverterApp:
                                 continue
                                 
                             if selected_set and val not in selected_set:
-                                counts["Остальные"] += 1
+                                split_key = "Остальные"
                             else:
-                                counts[val] += 1
+                                split_key = val
+
+                            if output_indices:
+                                row_key = tuple(
+                                    row[idx] if idx < len(row) else ""
+                                    for idx in output_indices
+                                )
+                                if row_key in seen_rows_by_split[split_key]:
+                                    continue
+                                seen_rows_by_split[split_key].add(row_key)
+
+                            counts[split_key] += 1
                                 
                     except (ValueError, StopIteration):
                         continue
@@ -257,7 +324,7 @@ class TSVConverterApp:
         self.window._hide_loading_overlay()
         
         if not counts:
-            self._log_message(f"Анализ разделения: нет данных для распределения", QColor("orange"))
+            self._log_message("Анализ разделения: нет данных для распределения", QColor("orange"))
             return
             
         mode_text = "Разделение по отдельным файлам" if mode == "files" else "Разделение по листам одного файла"
@@ -325,7 +392,12 @@ class TSVConverterApp:
                 # Запускаем подсчет
                 worker = LoadingWorker(
                     self._count_split_distribution_task,
-                    file_paths, column, selected, filter_col, self.window._filter_values
+                    file_paths,
+                    column,
+                    selected,
+                    filter_col,
+                    self.window._filter_values,
+                    list(self.window._selected_output_columns),
                 )
                 
                 worker.finished.connect(
@@ -431,6 +503,8 @@ class TSVConverterApp:
             filter_column=config.filter_column,
             filter_values=config.filter_values,
             pivot_settings=config.pivot_settings,
+            selected_columns=config.selected_columns,
+            deduplicate_rows=config.deduplicate_rows,
             ram_threshold=config.ram_threshold,
         )
 
@@ -579,6 +653,10 @@ class TSVConverterApp:
             with open(file_path, "r", encoding=encoding, errors="replace") as f:
                 reader = csv.reader(f, delimiter=delimiter)
                 headers = next(reader)
+
+            active_headers = self.window._get_active_output_columns()
+            if active_headers:
+                headers = active_headers
 
             dialog = PivotSettingsDialog(headers, self.window)
             if dialog.exec() == QDialog.DialogCode.Accepted:

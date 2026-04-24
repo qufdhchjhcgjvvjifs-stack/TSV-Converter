@@ -5,12 +5,11 @@
 
 import os
 import csv
-import gc
 import time
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Set
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QColor
@@ -40,6 +39,8 @@ class ConversionConfig:
     filter_column: str
     filter_values: List[str]
     pivot_settings: Dict[str, Any]
+    selected_columns: List[str] = field(default_factory=list)
+    deduplicate_rows: bool = True
     ram_threshold: int = 500000
 
 
@@ -450,6 +451,8 @@ class TSVToExcelConverter(QThread):
         filter_column: str = "",
         filter_values: Optional[List[str]] = None,
         pivot_settings: Optional[Dict[str, Any]] = None,
+        selected_columns: Optional[List[str]] = None,
+        deduplicate_rows: bool = True,
         ram_threshold: int = 500000,
     ):
         super().__init__()
@@ -467,6 +470,8 @@ class TSVToExcelConverter(QThread):
         self.filter_column = filter_column
         self.filter_values = set(filter_values) if filter_values else set()
         self.pivot_settings = pivot_settings
+        self.selected_columns = selected_columns or []
+        self.deduplicate_rows = deduplicate_rows
         self._timing = {}
         self._timing_total = 0.0
         self.ram_threshold = ram_threshold
@@ -476,6 +481,8 @@ class TSVToExcelConverter(QThread):
         self.generated_files: List[str] = []
         self.total_rows = 0
         self.processed_rows = 0
+        self.duplicates_removed = 0
+        self._deduplication_was_used = False
 
         # Трекер прогресса
         self.progress_tracker = ProgressTracker()
@@ -491,6 +498,8 @@ class TSVToExcelConverter(QThread):
             self._timing = {}
             self._timing_total = 0.0
             self.generated_files = []
+            self.duplicates_removed = 0
+            self._deduplication_was_used = False
 
             # Валидация
             if not self.input_files:
@@ -544,6 +553,11 @@ class TSVToExcelConverter(QThread):
             total_time = time.time() - t0
             self._timing_total = total_time
             self._log_timing_summary(total_time)
+            if self._deduplication_was_used:
+                self.log_message.emit(
+                    f"Удалено дубликатов после исключения столбцов: {self.duplicates_removed}",
+                    QColor("blue"),
+                )
 
             self.log_message.emit(
                 f"Конвертация завершена. Обработано файлов: {processed}",
@@ -567,6 +581,63 @@ class TSVToExcelConverter(QThread):
             return "Остальные"
 
         return value
+
+    def _get_output_columns(self, headers: List[str]) -> tuple[List[str], List[int]]:
+        """Возвращает заголовки и индексы столбцов для итогового файла."""
+        if not self.selected_columns:
+            return headers, list(range(len(headers)))
+
+        header_to_index = {}
+        for index, header in enumerate(headers):
+            if header not in header_to_index:
+                header_to_index[header] = index
+
+        output_indices = []
+        missing_columns = []
+        for column in self.selected_columns:
+            if column in header_to_index:
+                output_indices.append(header_to_index[column])
+            else:
+                missing_columns.append(column)
+
+        if missing_columns:
+            self.log_message.emit(
+                "Не найдены выбранные столбцы: " + ", ".join(missing_columns),
+                QColor("orange"),
+            )
+
+        if not output_indices:
+            self.log_message.emit(
+                "Выбранные столбцы не найдены. Будут сохранены все столбцы.",
+                QColor("orange"),
+            )
+            return headers, list(range(len(headers)))
+
+        if len(output_indices) != len(headers) or output_indices != list(range(len(headers))):
+            self.log_message.emit(
+                f"Столбцы вывода: {len(output_indices)} из {len(headers)}",
+                QColor("blue"),
+            )
+
+        return [headers[index] for index in output_indices], output_indices
+
+    @staticmethod
+    def _project_row(row: List[str], output_indices: List[int]) -> List[str]:
+        """Оставляет в строке только выбранные столбцы в заданном порядке."""
+        return [row[index] if index < len(row) else "" for index in output_indices]
+
+    def _should_deduplicate_rows(
+        self, headers: List[str], output_indices: List[int]
+    ) -> bool:
+        """Дедупликация включается только если пользователь исключил столбцы."""
+        enabled = (
+            self.deduplicate_rows
+            and bool(self.selected_columns)
+            and len(output_indices) < len(headers)
+        )
+        if enabled:
+            self._deduplication_was_used = True
+        return enabled
 
     def _finish_as_stopped(self):
         """Завершает поток в статусе пользовательской остановки."""
@@ -650,19 +721,79 @@ class TSVToExcelConverter(QThread):
                         except ValueError:
                             filter_idx = None
 
+                    # Индекс разделения
+                    split_idx = None
+                    if self.split_column and self.split_column != "Не разделять":
+                        try:
+                            split_idx = headers.index(self.split_column)
+                        except ValueError:
+                            split_idx = None
+
+                    output_indices = None
+                    if self.selected_columns and len(self.selected_columns) < len(headers):
+                        header_to_index = {}
+                        for index, header in enumerate(headers):
+                            if header not in header_to_index:
+                                header_to_index[header] = index
+                        output_indices = [
+                            header_to_index[column]
+                            for column in self.selected_columns
+                            if column in header_to_index
+                        ]
+
+                    deduplicate_rows = (
+                        self.deduplicate_rows
+                        and bool(self.selected_columns)
+                        and bool(output_indices)
+                        and len(output_indices) < len(headers)
+                    )
+                    seen_rows = set()
+                    seen_rows_by_split = defaultdict(set)
+
+                    def should_count_row(row: List[str]) -> bool:
+                        if split_idx is not None:
+                            split_value = self._get_split_value(
+                                row, split_idx, self.selected_values
+                            )
+                            if not split_value:
+                                return False
+                        else:
+                            split_value = None
+
+                        if deduplicate_rows:
+                            row_key = tuple(
+                                row[index] if index < len(row) else ""
+                                for index in output_indices
+                            )
+                            if split_value is not None:
+                                if row_key in seen_rows_by_split[split_value]:
+                                    return False
+                                seen_rows_by_split[split_value].add(row_key)
+                            else:
+                                if row_key in seen_rows:
+                                    return False
+                                seen_rows.add(row_key)
+
+                        return True
+
                     # Считаем строки (оптимизированные циклы)
                     if filter_idx is not None and self.filter_values:
                         filter_vals = self.filter_values  # Локальная ссылка быстрее
                         for i, row in enumerate(reader):
                             if i % self.STOP_CHECK_INTERVAL == 0 and self.stop_flag:
                                 return
-                            if filter_idx < len(row) and row[filter_idx] in filter_vals:
+                            if (
+                                filter_idx < len(row)
+                                and row[filter_idx] in filter_vals
+                                and should_count_row(row)
+                            ):
                                 self.total_rows += 1
                     else:
-                        for i, _ in enumerate(reader):
+                        for i, row in enumerate(reader):
                             if i % self.STOP_CHECK_INTERVAL == 0 and self.stop_flag:
                                 return
-                            self.total_rows += 1
+                            if should_count_row(row):
+                                self.total_rows += 1
 
             except PermissionError:
                 self.log_message.emit(
@@ -787,13 +918,25 @@ class TSVToExcelConverter(QThread):
     def _write_single_csv(self, reader, headers, base_name, filter_idx):
         output_path = os.path.join(self.output_directory, f"{base_name}.csv")
         current_file = os.path.basename(output_path)
+        output_headers, output_indices = self._get_output_columns(headers)
+        deduplicate_rows = self._should_deduplicate_rows(headers, output_indices)
+        seen_rows = set()
 
         with open(output_path, "w", encoding="utf-8-sig", newline="") as out_f:
             writer = csv.writer(out_f, delimiter=";")
-            writer.writerow(headers)
+            writer.writerow(output_headers)
 
             def process_row(row):
-                writer.writerow(row)
+                output_row = self._project_row(row, output_indices)
+                if deduplicate_rows:
+                    row_key = tuple(output_row)
+                    if row_key in seen_rows:
+                        self.duplicates_removed += 1
+                        return False
+                    seen_rows.add(row_key)
+
+                writer.writerow(output_row)
+                return True
 
             self._process_rows_with_progress(
                 reader, filter_idx, current_file, process_row, "Запись CSV..."
@@ -811,6 +954,9 @@ class TSVToExcelConverter(QThread):
         row_counts: Dict[str, int] = {}
         selected_vals = self.selected_values
         current_file = f"{base_name}_*.csv"
+        output_headers, output_indices = self._get_output_columns(headers)
+        deduplicate_rows = self._should_deduplicate_rows(headers, output_indices)
+        seen_rows_by_key = defaultdict(set)
 
         def _create_csv_file(key: str):
             """Создаёт CSV файл и записывает заголовок."""
@@ -822,7 +968,7 @@ class TSVToExcelConverter(QThread):
 
             f = open(file_path, "w", encoding="utf-8-sig", newline="")
             writer = csv.writer(f, delimiter=";")
-            writer.writerow(headers)
+            writer.writerow(output_headers)
 
             open_files[key] = f
             writers[key] = writer
@@ -833,7 +979,15 @@ class TSVToExcelConverter(QThread):
         def process_row(row):
             key = self._get_split_value(row, split_idx, selected_vals)
             if not key:
-                return
+                return False
+
+            output_row = self._project_row(row, output_indices)
+            if deduplicate_rows:
+                row_key = tuple(output_row)
+                if row_key in seen_rows_by_key[key]:
+                    self.duplicates_removed += 1
+                    return False
+                seen_rows_by_key[key].add(row_key)
 
             if key not in writers:
                 if len(open_files) >= MAX_OPEN_FILES:
@@ -844,8 +998,9 @@ class TSVToExcelConverter(QThread):
 
                 _create_csv_file(key)
 
-            writers[key].writerow(row)
+            writers[key].writerow(output_row)
             row_counts[key] = row_counts.get(key, 0) + 1
+            return True
 
         try:
             self._process_rows_with_progress(
@@ -1246,7 +1401,8 @@ class TSVToExcelConverter(QThread):
                 if filter_idx < len(row) and row[filter_idx] not in filter_vals:
                     continue
 
-                row_handler(row)
+                if row_handler(row) is False:
+                    continue
                 self.processed_rows += 1
                 if self.processed_rows % update_freq == 0:
                     self._emit_progress_update(current_file, operation_name)
@@ -1255,7 +1411,8 @@ class TSVToExcelConverter(QThread):
                 if row_num % self.STOP_CHECK_INTERVAL == 0 and self.stop_flag:
                     break
 
-                row_handler(row)
+                if row_handler(row) is False:
+                    continue
                 self.processed_rows += 1
                 if self.processed_rows % update_freq == 0:
                     self._emit_progress_update(current_file, operation_name)
@@ -1279,17 +1436,28 @@ class TSVToExcelConverter(QThread):
         used_names: Set[str] = set()
         MAX_ROWS = self.MAX_EXCEL_ROWS
         selected_vals = self.selected_values
+        output_headers, output_indices = self._get_output_columns(headers)
+        deduplicate_rows = self._should_deduplicate_rows(headers, output_indices)
+        seen_rows_by_value = defaultdict(set)
 
         def _create_sheet_with_headers(sheet_name: str):
             ws = workbook.add_worksheet(sheet_name)
-            for col, header in enumerate(headers):
+            for col, header in enumerate(output_headers):
                 ws.write(0, col, header, self._cached_formats["header"])
             return ws, 1
 
         def process_row(row):
             value = self._get_split_value(row, split_idx, selected_vals)
             if not value:
-                return
+                return False
+
+            output_row = self._project_row(row, output_indices)
+            if deduplicate_rows:
+                row_key = tuple(output_row)
+                if row_key in seen_rows_by_value[value]:
+                    self.duplicates_removed += 1
+                    return False
+                seen_rows_by_value[value].add(row_key)
 
             if value not in worksheets:
                 sheet_name = FileUtilities.sanitize_sheet_name(value, used_names)
@@ -1305,9 +1473,10 @@ class TSVToExcelConverter(QThread):
                 sheet_row_counts[value] = current_row
 
             worksheets[value].write_row(
-                current_row, 0, row, self._cached_formats["cell"]
+                current_row, 0, output_row, self._cached_formats["cell"]
             )
             sheet_row_counts[value] = current_row + 1
+            return True
 
         self._process_rows_with_progress(reader, filter_idx, current_file, process_row)
 
@@ -1331,6 +1500,9 @@ class TSVToExcelConverter(QThread):
         file_paths: Dict[str, str] = {}
         selected_vals = self.selected_values
         output_files: List[str] = []
+        output_headers, output_indices = self._get_output_columns(headers)
+        deduplicate_rows = self._should_deduplicate_rows(headers, output_indices)
+        seen_rows_by_value = defaultdict(set)
 
         use_constant_memory = self.total_rows >= self.ram_threshold
 
@@ -1389,7 +1561,7 @@ class TSVToExcelConverter(QThread):
 
             worksheet = workbook.add_worksheet(sheet_name)
 
-            for col, header in enumerate(headers):
+            for col, header in enumerate(output_headers):
                 worksheet.write(0, col, header, header_format)
 
             open_workbooks[value] = workbook
@@ -1403,19 +1575,28 @@ class TSVToExcelConverter(QThread):
         def process_row(row):
             value = self._get_split_value(row, split_idx, selected_vals)
             if not value:
-                return
+                return False
+
+            output_row = self._project_row(row, output_indices)
+            if deduplicate_rows:
+                row_key = tuple(output_row)
+                if row_key in seen_rows_by_value[value]:
+                    self.duplicates_removed += 1
+                    return False
+                seen_rows_by_value[value].add(row_key)
 
             if value not in open_worksheets:
                 _create_workbook_for_value(value)
 
             if value not in open_worksheets or value not in open_row_counts:
-                return
+                return False
 
             worksheet = open_worksheets[value]
             row_count = open_row_counts[value]
             workbook = open_workbooks[value]
-            worksheet.write_row(row_count, 0, row, workbook._tsv_cell_format)
+            worksheet.write_row(row_count, 0, output_row, workbook._tsv_cell_format)
             open_row_counts[value] = row_count + 1
+            return True
 
         self._process_rows_with_progress(reader, filter_idx, current_file, process_row)
 
@@ -1479,10 +1660,21 @@ class TSVToExcelConverter(QThread):
 
         used_names: Set[str] = set()
         MAX_ROWS = self.MAX_EXCEL_ROWS
+        output_headers, output_indices = self._get_output_columns(headers)
+        deduplicate_rows = self._should_deduplicate_rows(headers, output_indices)
+        seen_rows = set()
 
         # Вспомогательная функция для обработки
         def process_row(row):
             nonlocal worksheet, row_count, sheet_num
+            output_row = self._project_row(row, output_indices)
+            if deduplicate_rows:
+                row_key = tuple(output_row)
+                if row_key in seen_rows:
+                    self.duplicates_removed += 1
+                    return False
+                seen_rows.add(row_key)
+
             # Новый лист если нужно
             if worksheet is None or row_count >= MAX_ROWS:
                 sheet_name = FileUtilities.sanitize_sheet_name(
@@ -1494,12 +1686,13 @@ class TSVToExcelConverter(QThread):
                 sheet_num += 1
 
                 # Заголовок
-                for col, header in enumerate(headers):
+                for col, header in enumerate(output_headers):
                     worksheet.write(0, col, header, self._cached_formats["header"])
                 row_count = 1
 
-            worksheet.write_row(row_count, 0, row, self._cached_formats["cell"])
+            worksheet.write_row(row_count, 0, output_row, self._cached_formats["cell"])
             row_count += 1
+            return True
 
         self._process_rows_with_progress(reader, filter_idx, current_file, process_row)
 
