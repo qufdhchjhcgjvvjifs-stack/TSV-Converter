@@ -1044,7 +1044,7 @@ class TSVToExcelConverter(QThread):
 
             if pivot_data:
                 output_path = os.path.join(
-                    self.output_directory, f"{base_name}_Pivot.csv"
+                    self.output_directory, f"{base_name}_Сводная таблица.csv"
                 )
                 with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
                     writer = csv.writer(f, delimiter=";")
@@ -1214,7 +1214,7 @@ class TSVToExcelConverter(QThread):
                             if self.split_mode == "files" and split_idx is not None:
                                 # При разделении на файлы — сводная в отдельный файл
                                 pivot_output_path = os.path.join(
-                                    self.output_directory, f"{base_name}_Pivot.xlsx"
+                                    self.output_directory, f"{base_name}_Сводная таблица.xlsx"
                                 )
                                 pivot_workbook = xlsxwriter.Workbook(pivot_output_path)
 
@@ -1800,6 +1800,9 @@ class PivotTableProcessor:
                 duplicates_removed = 0
 
                 for row in reader:
+                    if not any(cell.strip() for cell in row):
+                        continue
+
                     # Фильтр
                     if filter_idx is not None and filter_values:
                         if filter_idx < len(row):

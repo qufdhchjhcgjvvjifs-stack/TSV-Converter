@@ -837,7 +837,9 @@ class UniqueValuesWorker(QThread):
                                         if row[filter_idx] not in filter_vals:
                                             continue
 
-                                values.add(row[col_idx])
+                                value = row[col_idx]
+                                if value.strip():
+                                    values.add(value)
 
                     except ValueError:
                         continue
@@ -1422,6 +1424,7 @@ class ColumnSelectionDialog(QDialog):
         self.column_list = QListWidget()
         self.column_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.column_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.column_list.setDragDropOverwriteMode(False)
         self.column_list.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.column_list.setDragEnabled(True)
         self.column_list.viewport().setAcceptDrops(True)
@@ -1482,7 +1485,6 @@ class ColumnSelectionDialog(QDialog):
                 item.flags()
                 | Qt.ItemFlag.ItemIsUserCheckable
                 | Qt.ItemFlag.ItemIsDragEnabled
-                | Qt.ItemFlag.ItemIsDropEnabled
             )
             item.setCheckState(
                 Qt.CheckState.Checked
