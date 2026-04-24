@@ -1453,6 +1453,11 @@ class ColumnSelectionDialog(QDialog):
         hint_label.setWordWrap(True)
         layout.addWidget(hint_label)
 
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Поиск...")
+        self.search_edit.textChanged.connect(self._on_search_text_changed)
+        layout.addWidget(self.search_edit)
+
         self.column_list = ColumnCheckBoxListWidget(parent=self, is_dark=self._is_dark)
         self.column_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.column_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
@@ -1527,15 +1532,28 @@ class ColumnSelectionDialog(QDialog):
             self.column_list.addItem(item)
 
         self.column_list.blockSignals(False)
+        self._on_search_text_changed(self.search_edit.text())
 
     def _select_all(self):
         for row in range(self.column_list.count()):
-            self.column_list.item(row).setCheckState(Qt.CheckState.Checked)
+            item = self.column_list.item(row)
+            if not item.isHidden():
+                item.setCheckState(Qt.CheckState.Checked)
         self._update_info()
 
     def _clear_all(self):
         for row in range(self.column_list.count()):
-            self.column_list.item(row).setCheckState(Qt.CheckState.Unchecked)
+            item = self.column_list.item(row)
+            if not item.isHidden():
+                item.setCheckState(Qt.CheckState.Unchecked)
+        self._update_info()
+
+    def _on_search_text_changed(self, text: str):
+        """Фильтрует список столбцов по строке поиска."""
+        search_text = text.lower()
+        for row in range(self.column_list.count()):
+            item = self.column_list.item(row)
+            item.setHidden(search_text not in item.text().lower())
         self._update_info()
 
     def _reset_order(self):
@@ -1545,9 +1563,22 @@ class ColumnSelectionDialog(QDialog):
         self._update_info()
 
     def _update_info(self):
+        if not hasattr(self, "info_label"):
+            return
+
         selected_count = len(self.get_selected_columns())
+        visible_count = sum(
+            1
+            for row in range(self.column_list.count())
+            if not self.column_list.item(row).isHidden()
+        )
+        suffix = (
+            f", найдено: {visible_count}"
+            if visible_count != len(self._headers)
+            else ""
+        )
         self.info_label.setText(
-            f"Выбрано столбцов: {selected_count} из {len(self._headers)}"
+            f"Выбрано столбцов: {selected_count} из {len(self._headers)}{suffix}"
         )
 
     def _validate_and_accept(self):
