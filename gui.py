@@ -533,7 +533,7 @@ def apply_theme_to_dialog(dialog: QDialog, is_dark: bool):
             widget.set_theme(is_dark)
 
         # Применяем тему к CheckBoxListWidget (для чекбоксов в списках)
-        if isinstance(widget, CheckBoxListWidget):
+        if isinstance(widget, (CheckBoxListWidget, ColumnCheckBoxListWidget)):
             widget.set_theme(is_dark)
 
         # Для QListWidget и QTableWidget не используем QSS для индикаторов,
@@ -1154,6 +1154,38 @@ class CheckBoxListDelegate(QStyledItemDelegate):
         return super().editorEvent(event, model, option, index)
 
 
+class ColumnCheckBoxListWidget(QListWidget):
+    """QListWidget с общей отрисовкой чекбоксов и состоянием в item.checkState()."""
+
+    def __init__(self, parent=None, is_dark: bool = False):
+        super().__init__(parent)
+        self._is_dark = is_dark
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setMouseTracking(True)
+        self._delegate = CheckBoxListDelegate(self, is_dark)
+        self.setItemDelegate(self._delegate)
+
+    def set_theme(self, is_dark: bool):
+        """Обновляет тему для delegate."""
+        self._is_dark = is_dark
+        self._delegate.set_theme(is_dark)
+        self.viewport().update()
+
+    def set_item_check_state(self, row: int, state: Qt.CheckState):
+        """Устанавливает состояние чекбокса для элемента."""
+        item = self.item(row)
+        if item:
+            item.setCheckState(state)
+        self.viewport().update()
+
+    def get_item_check_state(self, row: int) -> Qt.CheckState:
+        """Получает состояние чекбокса для элемента."""
+        item = self.item(row)
+        if item:
+            return item.checkState()
+        return Qt.CheckState.Unchecked
+
+
 class ColumnValuesDialog(QDialog):
     """
     Диалог выбора значений столбца.
@@ -1421,7 +1453,7 @@ class ColumnSelectionDialog(QDialog):
         hint_label.setWordWrap(True)
         layout.addWidget(hint_label)
 
-        self.column_list = QListWidget()
+        self.column_list = ColumnCheckBoxListWidget(parent=self, is_dark=self._is_dark)
         self.column_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.column_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.column_list.setDragDropOverwriteMode(False)
@@ -1481,16 +1513,16 @@ class ColumnSelectionDialog(QDialog):
         selected_set = set(self._selected_columns)
         for column in ordered_columns:
             item = QListWidgetItem(column)
-            item.setFlags(
-                item.flags()
-                | Qt.ItemFlag.ItemIsUserCheckable
-                | Qt.ItemFlag.ItemIsDragEnabled
-            )
             item.setCheckState(
                 Qt.CheckState.Checked
                 if column in selected_set
                 else Qt.CheckState.Unchecked
             )
+            item.setFlags(
+                item.flags()
+                | Qt.ItemFlag.ItemIsDragEnabled
+            )
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
             item.setData(Qt.ItemDataRole.UserRole, column)
             self.column_list.addItem(item)
 
