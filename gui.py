@@ -1155,19 +1155,20 @@ class CheckBoxListDelegate(QStyledItemDelegate):
 
 
 class ColumnCheckBoxListWidget(QListWidget):
-    """QListWidget с общей отрисовкой чекбоксов и состоянием в item.checkState()."""
+    """QListWidget с общей отрисовкой чекбоксов и состоянием в item data."""
+
+    _CHECK_STATE_ROLE = Qt.ItemDataRole.UserRole.value + 1
 
     def __init__(self, parent=None, is_dark: bool = False):
         super().__init__(parent)
-        self._is_dark = is_dark
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.setMouseTracking(True)
         self._delegate = CheckBoxListDelegate(self, is_dark)
         self.setItemDelegate(self._delegate)
+        self._on_check_state_changed = None
 
     def set_theme(self, is_dark: bool):
         """Обновляет тему для delegate."""
-        self._is_dark = is_dark
         self._delegate.set_theme(is_dark)
         self.viewport().update()
 
@@ -1175,14 +1176,18 @@ class ColumnCheckBoxListWidget(QListWidget):
         """Устанавливает состояние чекбокса для элемента."""
         item = self.item(row)
         if item:
-            item.setCheckState(state)
+            item.setData(self._CHECK_STATE_ROLE, state)
         self.viewport().update()
+        if self._on_check_state_changed and not self.signalsBlocked():
+            self._on_check_state_changed()
 
     def get_item_check_state(self, row: int) -> Qt.CheckState:
         """Получает состояние чекбокса для элемента."""
         item = self.item(row)
         if item:
-            return item.checkState()
+            state = item.data(self._CHECK_STATE_ROLE)
+            if state is not None:
+                return Qt.CheckState(state)
         return Qt.CheckState.Unchecked
 
 
@@ -1255,11 +1260,11 @@ class ColumnValuesDialog(QDialog):
         self.value_list._on_check_state_changed = self._update_info
 
         # Добавляем элементы с чекбоксами
-        for value in self._values:
+        for i, value in enumerate(self._values):
             item = QListWidgetItem(value)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Unchecked)
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
             self.value_list.addItem(item)
+            self.value_list._check_states[i] = Qt.CheckState.Unchecked
 
         layout.addWidget(self.value_list)
 
@@ -1466,7 +1471,7 @@ class ColumnSelectionDialog(QDialog):
         self.column_list.setDragEnabled(True)
         self.column_list.viewport().setAcceptDrops(True)
         self.column_list.setDropIndicatorShown(True)
-        self.column_list.itemChanged.connect(self._update_info)
+        self.column_list._on_check_state_changed = self._update_info
         layout.addWidget(self.column_list)
 
         self._load_columns()
@@ -1518,11 +1523,6 @@ class ColumnSelectionDialog(QDialog):
         selected_set = set(self._selected_columns)
         for column in ordered_columns:
             item = QListWidgetItem(column)
-            item.setCheckState(
-                Qt.CheckState.Checked
-                if column in selected_set
-                else Qt.CheckState.Unchecked
-            )
             item.setFlags(
                 item.flags()
                 | Qt.ItemFlag.ItemIsDragEnabled
@@ -1530,22 +1530,32 @@ class ColumnSelectionDialog(QDialog):
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
             item.setData(Qt.ItemDataRole.UserRole, column)
             self.column_list.addItem(item)
+            self.column_list.set_item_check_state(
+                self.column_list.count() - 1,
+                Qt.CheckState.Checked
+                if column in selected_set
+                else Qt.CheckState.Unchecked,
+            )
 
         self.column_list.blockSignals(False)
         self._on_search_text_changed(self.search_edit.text())
 
     def _select_all(self):
+        self.column_list.blockSignals(True)
         for row in range(self.column_list.count()):
             item = self.column_list.item(row)
             if not item.isHidden():
-                item.setCheckState(Qt.CheckState.Checked)
+                self.column_list.set_item_check_state(row, Qt.CheckState.Checked)
+        self.column_list.blockSignals(False)
         self._update_info()
 
     def _clear_all(self):
+        self.column_list.blockSignals(True)
         for row in range(self.column_list.count()):
             item = self.column_list.item(row)
             if not item.isHidden():
-                item.setCheckState(Qt.CheckState.Unchecked)
+                self.column_list.set_item_check_state(row, Qt.CheckState.Unchecked)
+        self.column_list.blockSignals(False)
         self._update_info()
 
     def _on_search_text_changed(self, text: str):
@@ -1560,7 +1570,6 @@ class ColumnSelectionDialog(QDialog):
         selected = set(self.get_selected_columns())
         self._selected_columns = [column for column in self._headers if column in selected]
         self._load_columns()
-        self._update_info()
 
     def _update_info(self):
         if not hasattr(self, "info_label"):
@@ -1600,7 +1609,7 @@ class ColumnSelectionDialog(QDialog):
         columns = []
         for row in range(self.column_list.count()):
             item = self.column_list.item(row)
-            if item.checkState() == Qt.CheckState.Checked:
+            if self.column_list.get_item_check_state(row) == Qt.CheckState.Checked:
                 columns.append(item.data(Qt.ItemDataRole.UserRole))
         return columns
 
@@ -3229,6 +3238,10 @@ class MainWindow(QMainWindow):
             self._selected_output_columns = existing_selected + new_columns
         else:
             self._selected_output_columns = []
+            self._selected_column_values.clear()
+            self._split_modes.clear()
+            self._filter_values.clear()
+            self._pivot_settings = None
 
         combo_headers = self._get_active_output_columns()
 
@@ -3264,8 +3277,20 @@ class MainWindow(QMainWindow):
     def _sync_column_dependent_settings(self):
         """Синхронизирует split/filter/pivot после изменения набора столбцов."""
         active_columns = self._get_active_output_columns()
+        active_set = set(active_columns)
         current_split = self.split_column_combo.currentText()
         current_filter = self.filter_column_combo.currentText()
+
+        for column in list(self._selected_column_values):
+            if column not in active_set:
+                self._selected_column_values.pop(column, None)
+                self._split_modes.pop(column, None)
+        for column in list(self._split_modes):
+            if column not in active_set:
+                self._split_modes.pop(column, None)
+        for column in list(self._filter_values):
+            if column not in active_set:
+                self._filter_values.pop(column, None)
 
         self.split_column_combo.blockSignals(True)
         self.filter_column_combo.blockSignals(True)
@@ -3426,7 +3451,7 @@ class MainWindow(QMainWindow):
             self.columns_info_label.setText("Недоступно")
             return
 
-        selected_count = len(self._selected_output_columns) or len(self._available_headers)
+        selected_count = len(self._selected_output_columns)
         self.columns_info_label.setText(
             f"Столбцов: {selected_count} из {len(self._available_headers)}"
         )
