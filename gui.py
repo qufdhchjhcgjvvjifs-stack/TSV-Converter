@@ -1205,6 +1205,7 @@ class ColumnValuesDialog(QDialog):
         column: str = "",
         filter_column: str = "",
         filter_values: Optional[List[str]] = None,
+        selected_values: Optional[List[str]] = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Выберите значения")
@@ -1221,6 +1222,7 @@ class ColumnValuesDialog(QDialog):
         self._column = column
         self._filter_column = filter_column
         self._filter_values = filter_values or []
+        self._selected_values = set(selected_values or [])
         self._worker = None
 
         # Сначала инициализируем UI
@@ -1245,14 +1247,6 @@ class ColumnValuesDialog(QDialog):
         self.search_edit.textChanged.connect(self._on_search_text_changed)
         layout.addWidget(self.search_edit)
 
-        # Переключатель режима разделения
-        self.split_files_checkbox = StyledCheckBox("Разделять на файлы")
-        self.split_files_checkbox.setToolTip(
-            "Если включено — каждое значение будет сохранено в отдельный XLSX файл.\n"
-            "Если выключено — все значения будут на разных листах одного файла."
-        )
-        layout.addWidget(self.split_files_checkbox)
-
         # Список с кастомным виджетом для чекбоксов
         # Передаём тему для корректной отрисовки чекбоксов в Windows 11
         self.value_list = CheckBoxListWidget(parent=self, is_dark=self._is_dark)
@@ -1264,7 +1258,11 @@ class ColumnValuesDialog(QDialog):
             item = QListWidgetItem(value)
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
             self.value_list.addItem(item)
-            self.value_list._check_states[i] = Qt.CheckState.Unchecked
+            self.value_list._check_states[i] = (
+                Qt.CheckState.Checked
+                if value in self._selected_values
+                else Qt.CheckState.Unchecked
+            )
 
         layout.addWidget(self.value_list)
 
@@ -1356,8 +1354,11 @@ class ColumnValuesDialog(QDialog):
             flags = item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable
             item.setFlags(flags)
             self.value_list.addItem(item)
-            # Инициализируем состояние как Unchecked
-            self.value_list._check_states[i] = Qt.CheckState.Unchecked
+            self.value_list._check_states[i] = (
+                Qt.CheckState.Checked
+                if value in self._selected_values
+                else Qt.CheckState.Unchecked
+            )
 
         self._update_info()
 
@@ -1414,11 +1415,6 @@ class ColumnValuesDialog(QDialog):
             if self.value_list._check_states.get(i, Qt.CheckState.Unchecked)
             == Qt.CheckState.Checked
         ]
-
-    def get_split_mode(self) -> str:
-        """Возвращает режим разделения: 'sheets' или 'files'."""
-        return "files" if self.split_files_checkbox.isChecked() else "sheets"
-
 
 class ColumnSelectionDialog(QDialog):
     """
@@ -2737,8 +2733,8 @@ class MainWindow(QMainWindow):
 
         # Данные фильтра и сводной таблицы
         self._filter_values: Dict[str, List[str]] = {}
-        self._selected_column_values: Dict[str, List[str]] = {}
-        self._split_modes: Dict[str, str] = {}  # column -> "sheets" или "files"
+        self._file_split_values: Dict[str, List[str]] = {}
+        self._sheet_split_values: Dict[str, List[str]] = {}
         self._pivot_settings: Optional[Dict[str, Any]] = None
         self._available_headers: List[str] = []
         self._selected_output_columns: List[str] = []
@@ -2912,18 +2908,33 @@ class MainWindow(QMainWindow):
         browse_btn.clicked.connect(self._select_output_directory)
         layout.addWidget(browse_btn, 0, 4)
 
-        # Строка 2: Разделение и фильтр
-        layout.addWidget(QLabel("Разделить по столбцу:"), 1, 0)
-        self.split_column_combo = QComboBox()
-        self.split_column_combo.addItem("Не разделять")
-        layout.addWidget(self.split_column_combo, 1, 1)
+        # Строка 2: Разделение на файлы и листы
+        layout.addWidget(QLabel("Разделить на файлы по столбцу:"), 1, 0)
+        self.file_split_column_combo = QComboBox()
+        self.file_split_column_combo.addItem("Не разделять на файлы")
+        layout.addWidget(self.file_split_column_combo, 1, 1)
 
-        layout.addWidget(QLabel("Фильтр по столбцу:"), 1, 2)
+        layout.addWidget(QLabel("Разделить на листы по столбцу:"), 1, 2)
+        self.split_column_combo = QComboBox()
+        self.split_column_combo.addItem("Не разделять на листы")
+        layout.addWidget(self.split_column_combo, 1, 3)
+
+        # Строка 3: фильтр и выбор итоговых столбцов
+        layout.addWidget(QLabel("Фильтр по столбцу:"), 2, 0)
         self.filter_column_combo = QComboBox()
         self.filter_column_combo.addItem("Не фильтровать")
-        layout.addWidget(self.filter_column_combo, 1, 3)
+        layout.addWidget(self.filter_column_combo, 2, 1)
 
-        # Строка 3: Стили - с увеличенными отступами
+        layout.addWidget(QLabel("Столбцы вывода:"), 2, 2)
+        self.columns_btn = SecondaryButton("Настроить...")
+        self.columns_btn.clicked.connect(self._show_column_selection)
+        self.columns_btn.setEnabled(False)
+        layout.addWidget(self.columns_btn, 2, 3)
+
+        self.columns_info_label = QLabel("Недоступно")
+        layout.addWidget(self.columns_info_label, 2, 4)
+
+        # Строка 4: Стили - с увеличенными отступами
         styles_layout = QHBoxLayout()
         styles_layout.setSpacing(12)  # Увеличенный отступ между элементами
 
@@ -2970,17 +2981,7 @@ class MainWindow(QMainWindow):
         styles_layout.addWidget(self.header_color_btn)
 
         styles_layout.addStretch()
-        layout.addLayout(styles_layout, 2, 0, 1, 5)
-
-        # Строка 4: выбор итоговых столбцов
-        layout.addWidget(QLabel("Столбцы вывода:"), 3, 0)
-        self.columns_btn = SecondaryButton("Настроить...")
-        self.columns_btn.clicked.connect(self._show_column_selection)
-        self.columns_btn.setEnabled(False)
-        layout.addWidget(self.columns_btn, 3, 1)
-
-        self.columns_info_label = QLabel("Недоступно")
-        layout.addWidget(self.columns_info_label, 3, 2, 1, 3)
+        layout.addLayout(styles_layout, 3, 0, 1, 5)
 
         return widget
 
@@ -3226,6 +3227,7 @@ class MainWindow(QMainWindow):
     def _update_column_combos(self, headers: List[str]):
         """Обновляет комбобоксы столбцов."""
         # Сохраняем текущие значения
+        current_file_split = self.file_split_column_combo.currentText()
         current_split = self.split_column_combo.currentText()
         current_filter = self.filter_column_combo.currentText()
         self._available_headers = list(headers)
@@ -3238,29 +3240,46 @@ class MainWindow(QMainWindow):
             self._selected_output_columns = existing_selected + new_columns
         else:
             self._selected_output_columns = []
-            self._selected_column_values.clear()
-            self._split_modes.clear()
+            self._file_split_values.clear()
+            self._sheet_split_values.clear()
             self._filter_values.clear()
             self._pivot_settings = None
 
         combo_headers = self._get_active_output_columns()
+        combo_header_set = set(combo_headers)
+        for column in list(self._file_split_values):
+            if column not in combo_header_set:
+                self._file_split_values.pop(column, None)
+        for column in list(self._sheet_split_values):
+            if column not in combo_header_set:
+                self._sheet_split_values.pop(column, None)
+        for column in list(self._filter_values):
+            if column not in combo_header_set:
+                self._filter_values.pop(column, None)
 
         # Очищаем
+        self.file_split_column_combo.blockSignals(True)
         self.split_column_combo.blockSignals(True)
         self.filter_column_combo.blockSignals(True)
+        self.file_split_column_combo.clear()
         self.split_column_combo.clear()
         self.filter_column_combo.clear()
 
-        self.split_column_combo.addItem("Не разделять")
+        self.file_split_column_combo.addItem("Не разделять на файлы")
+        self.split_column_combo.addItem("Не разделять на листы")
         self.filter_column_combo.addItem("Не фильтровать")
+        self.file_split_column_combo.addItems(combo_headers)
         self.split_column_combo.addItems(combo_headers)
         self.filter_column_combo.addItems(combo_headers)
 
         # Восстанавливаем значения если возможно
+        if current_file_split in combo_headers:
+            self.file_split_column_combo.setCurrentText(current_file_split)
         if current_split in combo_headers:
             self.split_column_combo.setCurrentText(current_split)
         if current_filter in combo_headers:
             self.filter_column_combo.setCurrentText(current_filter)
+        self.file_split_column_combo.blockSignals(False)
         self.split_column_combo.blockSignals(False)
         self.filter_column_combo.blockSignals(False)
 
@@ -3278,40 +3297,49 @@ class MainWindow(QMainWindow):
         """Синхронизирует split/filter/pivot после изменения набора столбцов."""
         active_columns = self._get_active_output_columns()
         active_set = set(active_columns)
+        current_file_split = self.file_split_column_combo.currentText()
         current_split = self.split_column_combo.currentText()
         current_filter = self.filter_column_combo.currentText()
 
-        for column in list(self._selected_column_values):
+        for column in list(self._file_split_values):
             if column not in active_set:
-                self._selected_column_values.pop(column, None)
-                self._split_modes.pop(column, None)
-        for column in list(self._split_modes):
+                self._file_split_values.pop(column, None)
+        for column in list(self._sheet_split_values):
             if column not in active_set:
-                self._split_modes.pop(column, None)
+                self._sheet_split_values.pop(column, None)
         for column in list(self._filter_values):
             if column not in active_set:
                 self._filter_values.pop(column, None)
 
+        self.file_split_column_combo.blockSignals(True)
         self.split_column_combo.blockSignals(True)
         self.filter_column_combo.blockSignals(True)
+        self.file_split_column_combo.clear()
         self.split_column_combo.clear()
         self.filter_column_combo.clear()
-        self.split_column_combo.addItem("Не разделять")
+        self.file_split_column_combo.addItem("Не разделять на файлы")
+        self.split_column_combo.addItem("Не разделять на листы")
         self.filter_column_combo.addItem("Не фильтровать")
+        self.file_split_column_combo.addItems(active_columns)
         self.split_column_combo.addItems(active_columns)
         self.filter_column_combo.addItems(active_columns)
+
+        if current_file_split in active_columns:
+            self.file_split_column_combo.setCurrentText(current_file_split)
+        else:
+            self._file_split_values.pop(current_file_split, None)
 
         if current_split in active_columns:
             self.split_column_combo.setCurrentText(current_split)
         else:
-            self._selected_column_values.pop(current_split, None)
-            self._split_modes.pop(current_split, None)
+            self._sheet_split_values.pop(current_split, None)
 
         if current_filter in active_columns:
             self.filter_column_combo.setCurrentText(current_filter)
         else:
             self._filter_values.pop(current_filter, None)
 
+        self.file_split_column_combo.blockSignals(False)
         self.split_column_combo.blockSignals(False)
         self.filter_column_combo.blockSignals(False)
 
@@ -3341,8 +3369,13 @@ class MainWindow(QMainWindow):
         """Обновляет состояние комбобоксов split/filter в зависимости от количества файлов."""
         file_count = self.file_list.count()
         if file_count > 1:
+            self.file_split_column_combo.setEnabled(False)
             self.split_column_combo.setEnabled(False)
             self.filter_column_combo.setEnabled(False)
+            self.file_split_column_combo.setToolTip(
+                "Функция недоступна при загрузке нескольких файлов. "
+                "Split/filter работает только для одного файла."
+            )
             self.split_column_combo.setToolTip(
                 "Функция недоступна при загрузке нескольких файлов. "
                 "Split/filter работает только для одного файла."
@@ -3356,8 +3389,10 @@ class MainWindow(QMainWindow):
                 "Функция доступна только при загрузке одного файла."
             )
         else:
+            self.file_split_column_combo.setEnabled(True)
             self.split_column_combo.setEnabled(True)
             self.filter_column_combo.setEnabled(True)
+            self.file_split_column_combo.setToolTip("")
             self.split_column_combo.setToolTip("")
             self.filter_column_combo.setToolTip("")
             self.columns_btn.setEnabled(file_count == 1 and bool(self._available_headers))
@@ -3491,18 +3526,19 @@ class MainWindow(QMainWindow):
             "border": 1 if self.border_checkbox.isChecked() else 0,
         }
 
+        file_split_column = self.file_split_column_combo.currentText()
         split_column = self.split_column_combo.currentText()
         filter_column = self.filter_column_combo.currentText()
 
-        split_mode = (
-            self._split_modes.get(split_column, "sheets")
-            if split_column != "Не разделять"
-            else "sheets"
+        file_split_values = (
+            self._file_split_values.get(file_split_column, [])
+            if file_split_column != "Не разделять на файлы"
+            else []
         )
 
         selected_values = (
-            self._selected_column_values.get(split_column, [])
-            if split_column != "Не разделять"
+            self._sheet_split_values.get(split_column, [])
+            if split_column != "Не разделять на листы"
             else []
         )
         filter_values = (
@@ -3520,8 +3556,10 @@ class MainWindow(QMainWindow):
             auto_delete=self._settings.get("auto_delete", False),
             styles=styles,
             header_color=self._header_color.name(),
+            file_split_column=file_split_column,
+            file_split_values=file_split_values,
             split_column=split_column,
-            split_mode=split_mode,
+            split_mode="sheets",
             selected_values=selected_values,
             filter_column=filter_column,
             filter_values=filter_values,

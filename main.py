@@ -6,6 +6,7 @@
 import sys
 import os
 import csv
+import hashlib
 from datetime import datetime
 from collections import defaultdict
 
@@ -56,6 +57,17 @@ class TSVConverterApp:
         # Таймер
         self._timer.timeout.connect(self._update_timer)
 
+    @staticmethod
+    def _dedup_key(values):
+        """Компактный ключ дедупликации без хранения всех строковых значений."""
+        digest = hashlib.blake2b(digest_size=16)
+        for value in values:
+            data = value.encode("utf-8", errors="replace")
+            digest.update(str(len(data)).encode("ascii"))
+            digest.update(b":")
+            digest.update(data)
+        return digest.digest()
+
     def _connect_signals(self):
         """Подключает сигналы GUI к обработчикам."""
         # Кнопки главного окна
@@ -75,6 +87,9 @@ class TSVConverterApp:
         self.window.columns_changed.connect(self._on_columns_changed)
 
         # Комбобоксы
+        self.window.file_split_column_combo.currentIndexChanged.connect(
+            self._on_file_split_column_selected
+        )
         self.window.split_column_combo.currentIndexChanged.connect(
             self._on_split_column_selected
         )
@@ -147,6 +162,10 @@ class TSVConverterApp:
 
         filter_col = self.window.filter_column_combo.currentText()
         filter_values = dict(self.window._filter_values)
+        file_split_col = self.window.file_split_column_combo.currentText()
+        sheet_split_col = self.window.split_column_combo.currentText()
+        file_split_values = dict(self.window._file_split_values)
+        sheet_split_values = dict(self.window._sheet_split_values)
         selected_columns = (
             list(self.window._selected_output_columns) if len(files) == 1 else []
         )
@@ -156,7 +175,15 @@ class TSVConverterApp:
 
         # Запускаем в отдельном потоке
         worker = LoadingWorker(
-            self._count_rows_task, files, filter_col, filter_values, selected_columns
+            self._count_rows_task,
+            files,
+            filter_col,
+            filter_values,
+            file_split_col,
+            file_split_values,
+            sheet_split_col,
+            sheet_split_values,
+            selected_columns,
         )
         worker.finished.connect(
             lambda total: self.window.total_rows_label.setText(f"Строк: {total:,}")
@@ -175,8 +202,19 @@ class TSVConverterApp:
         worker.start()
 
     @staticmethod
-    def _count_rows_task(files, filter_col, filter_values, selected_columns=None):
+    def _count_rows_task(
+        files,
+        filter_col,
+        filter_values,
+        file_split_col="",
+        file_split_values=None,
+        sheet_split_col="",
+        sheet_split_values=None,
+        selected_columns=None,
+    ):
         """Фоновая задача подсчета строк."""
+        file_split_values = file_split_values or {}
+        sheet_split_values = sheet_split_values or {}
         selected_columns = selected_columns or []
         total = 0
         for file_path in files:
@@ -186,8 +224,13 @@ class TSVConverterApp:
 
                 filter_idx = None
                 filter_vals = None
+                file_split_idx = None
+                file_split_vals = set()
+                sheet_split_idx = None
+                sheet_split_vals = set()
                 output_indices = None
                 seen_rows = set()
+                seen_rows_by_destination = defaultdict(set)
 
                 with open(file_path, "r", encoding=encoding, errors="replace") as f:
                     reader = csv.reader(f, delimiter=delimiter)
@@ -199,6 +242,20 @@ class TSVConverterApp:
                             filter_vals = set(filter_values.get(filter_col, []))
                         except ValueError:
                             filter_idx = None
+
+                    if file_split_col and file_split_col != "Не разделять на файлы":
+                        try:
+                            file_split_idx = headers.index(file_split_col)
+                            file_split_vals = set(file_split_values.get(file_split_col, []))
+                        except ValueError:
+                            file_split_idx = None
+
+                    if sheet_split_col and sheet_split_col != "Не разделять на листы":
+                        try:
+                            sheet_split_idx = headers.index(sheet_split_col)
+                            sheet_split_vals = set(sheet_split_values.get(sheet_split_col, []))
+                        except ValueError:
+                            sheet_split_idx = None
 
                     if selected_columns and len(selected_columns) < len(headers):
                         header_to_index = {}
@@ -216,14 +273,42 @@ class TSVConverterApp:
                             if filter_idx >= len(row) or row[filter_idx] not in filter_vals:
                                 continue
 
+                        file_split_value = None
+                        if file_split_idx is not None:
+                            value = row[file_split_idx] if file_split_idx < len(row) else ""
+                            if not value or not value.strip():
+                                continue
+                            file_split_value = (
+                                "Остальные"
+                                if file_split_vals and value not in file_split_vals
+                                else value
+                            )
+
+                        sheet_split_value = None
+                        if sheet_split_idx is not None:
+                            value = row[sheet_split_idx] if sheet_split_idx < len(row) else ""
+                            if not value or not value.strip():
+                                continue
+                            sheet_split_value = (
+                                "Остальные"
+                                if sheet_split_vals and value not in sheet_split_vals
+                                else value
+                            )
+
                         if output_indices:
-                            row_key = tuple(
+                            row_key = TSVConverterApp._dedup_key(
                                 row[index] if index < len(row) else ""
                                 for index in output_indices
                             )
-                            if row_key in seen_rows:
-                                continue
-                            seen_rows.add(row_key)
+                            if file_split_value is not None or sheet_split_value is not None:
+                                destination_key = (file_split_value, sheet_split_value)
+                                if row_key in seen_rows_by_destination[destination_key]:
+                                    continue
+                                seen_rows_by_destination[destination_key].add(row_key)
+                            else:
+                                if row_key in seen_rows:
+                                    continue
+                                seen_rows.add(row_key)
 
                         total += 1
             except (OSError, IOError, UnicodeDecodeError):
@@ -238,21 +323,33 @@ class TSVConverterApp:
     @staticmethod
     def _count_split_distribution_task(
         files,
-        split_col,
-        selected_values,
+        file_split_col,
+        file_split_values,
+        sheet_split_col,
+        sheet_split_values,
         filter_col,
         filter_values_dict,
         selected_columns=None,
     ):
         """Фоновая задача подсчета распределения строк по значениям разделения."""
-        counts = defaultdict(int)
-        selected_set = set(selected_values)
+        counts = defaultdict(lambda: defaultdict(int))
+        file_selected_set = set(file_split_values)
+        sheet_selected_set = set(sheet_split_values)
         selected_columns = selected_columns or []
-        seen_rows_by_split = defaultdict(set)
+        seen_rows_by_destination = defaultdict(set)
+        total_rows = 0
         
         filter_vals = None
         if filter_col and filter_col != "Не фильтровать":
             filter_vals = set(filter_values_dict.get(filter_col, []))
+
+        def get_split_value(row, split_idx, selected_set):
+            val = row[split_idx] if split_idx < len(row) else ""
+            if not val or not val.strip():
+                return ""
+            if selected_set and val not in selected_set:
+                return "Остальные"
+            return val
 
         for file_path in files:
             try:
@@ -263,10 +360,19 @@ class TSVConverterApp:
                     reader = csv.reader(f, delimiter=delimiter)
                     try:
                         headers = next(reader)
-                        if split_col not in headers:
-                            continue
-                            
-                        split_idx = headers.index(split_col)
+                        file_split_idx = None
+                        sheet_split_idx = None
+
+                        if file_split_col and file_split_col != "Не разделять на файлы":
+                            if file_split_col not in headers:
+                                continue
+                            file_split_idx = headers.index(file_split_col)
+
+                        if sheet_split_col and sheet_split_col != "Не разделять на листы":
+                            if sheet_split_col not in headers:
+                                continue
+                            sheet_split_idx = headers.index(sheet_split_col)
+
                         output_indices = None
                         if selected_columns and len(selected_columns) < len(headers):
                             header_to_index = {}
@@ -291,57 +397,113 @@ class TSVConverterApp:
                             if filter_idx is not None:
                                 if filter_idx < len(row) and row[filter_idx] not in filter_vals:
                                     continue
-                            
-                            # Разделение
-                            val = row[split_idx] if split_idx < len(row) else ""
-                            if not val or not val.strip():
-                                continue
-                                
-                            if selected_set and val not in selected_set:
-                                split_key = "Остальные"
-                            else:
-                                split_key = val
+
+                            file_key = ""
+                            if file_split_idx is not None:
+                                file_key = get_split_value(
+                                    row, file_split_idx, file_selected_set
+                                )
+                                if not file_key:
+                                    continue
+
+                            sheet_key = ""
+                            if sheet_split_idx is not None:
+                                sheet_key = get_split_value(
+                                    row, sheet_split_idx, sheet_selected_set
+                                )
+                                if not sheet_key:
+                                    continue
 
                             if output_indices:
-                                row_key = tuple(
+                                row_key = TSVConverterApp._dedup_key(
                                     row[idx] if idx < len(row) else ""
                                     for idx in output_indices
                                 )
-                                if row_key in seen_rows_by_split[split_key]:
+                                destination_key = (file_key, sheet_key)
+                                if row_key in seen_rows_by_destination[destination_key]:
                                     continue
-                                seen_rows_by_split[split_key].add(row_key)
+                                seen_rows_by_destination[destination_key].add(row_key)
 
-                            counts[split_key] += 1
+                            counts[file_key][sheet_key] += 1
+                            total_rows += 1
                                 
                     except (ValueError, StopIteration):
                         continue
             except (OSError, IOError, UnicodeDecodeError):
                 pass
-        return dict(counts)
+        return {
+            "file_column": file_split_col,
+            "sheet_column": sheet_split_col,
+            "counts": {key: dict(value) for key, value in counts.items()},
+            "total_rows": total_rows,
+        }
 
-    def _on_split_distribution_calculated(self, counts, column, mode):
+    def _on_split_distribution_calculated(self, result):
         """Обработчик завершения подсчета распределения."""
         self.window._hide_loading_overlay()
-        
+
+        counts = result.get("counts", {}) if isinstance(result, dict) else {}
+        total_rows = result.get("total_rows", 0) if isinstance(result, dict) else 0
+        file_column = result.get("file_column", "") if isinstance(result, dict) else ""
+        sheet_column = result.get("sheet_column", "") if isinstance(result, dict) else ""
+        has_file_split = bool(file_column and file_column != "Не разделять на файлы")
+        has_sheet_split = bool(sheet_column and sheet_column != "Не разделять на листы")
+
         if not counts:
             self._log_message("Анализ разделения: нет данных для распределения", QColor("orange"))
             return
-            
-        mode_text = "Разделение по отдельным файлам" if mode == "files" else "Разделение по листам одного файла"
-        
-        self._log_message(f"=== Прогноз разделения (Колонка: {column}) ===", QColor("cyan"))
-        self._log_message(f"Режим: {mode_text}", QColor("blue"))
-        
-        total_rows = 0
-        idx = 1
-        for val, count in sorted(counts.items(), key=lambda x: x[1], reverse=True):
-            self._log_message(f"{idx}. {val}: {count:,} строк", QColor("gray"))
-            total_rows += count
-            idx += 1
-            
-        item_type = "файлов" if mode == "files" else "листов"
+
+        self._log_message("=== Прогноз разделения ===", QColor("cyan"))
+        if has_file_split:
+            self._log_message(f"Файлы по столбцу: {file_column}", QColor("blue"))
+        if has_sheet_split:
+            self._log_message(f"Листы по столбцу: {sheet_column}", QColor("blue"))
+
+        if has_file_split and has_sheet_split:
+            sorted_files = sorted(
+                counts.items(), key=lambda item: sum(item[1].values()), reverse=True
+            )
+            for file_idx, (file_value, sheet_counts) in enumerate(sorted_files, start=1):
+                file_total = sum(sheet_counts.values())
+                self._log_message(
+                    f"{file_idx}. Файл: {file_value}: {file_total:,} строк",
+                    QColor("gray"),
+                )
+                sorted_sheets = sorted(
+                    sheet_counts.items(), key=lambda item: item[1], reverse=True
+                )
+                for sheet_idx, (sheet_value, count) in enumerate(sorted_sheets, start=1):
+                    self._log_message(
+                        f"   {sheet_idx}. Лист: {sheet_value}: {count:,} строк",
+                        QColor("gray"),
+                    )
+        elif has_file_split:
+            sorted_files = sorted(
+                counts.items(), key=lambda item: sum(item[1].values()), reverse=True
+            )
+            for idx, (file_value, sheet_counts) in enumerate(sorted_files, start=1):
+                self._log_message(
+                    f"{idx}. Файл: {file_value}: {sum(sheet_counts.values()):,} строк",
+                    QColor("gray"),
+                )
+        else:
+            sheet_counts = counts.get("", {})
+            for idx, (sheet_value, count) in enumerate(
+                sorted(sheet_counts.items(), key=lambda item: item[1], reverse=True),
+                start=1,
+            ):
+                self._log_message(
+                    f"{idx}. Лист: {sheet_value}: {count:,} строк",
+                    QColor("gray"),
+                )
+
+        item_type = "файлов" if has_file_split else "листов"
+        item_count = len(counts) if has_file_split else len(counts.get("", {}))
         self._log_message("-" * 40, QColor("cyan"))
-        self._log_message(f"Итого будет создано {item_type}: {len(counts)}", QColor("blue"))
+        self._log_message(f"Итого будет создано {item_type}: {item_count}", QColor("blue"))
+        if has_file_split and has_sheet_split:
+            total_sheets = sum(len(sheet_counts) for sheet_counts in counts.values())
+            self._log_message(f"Итого листов внутри файлов: {total_sheets}", QColor("blue"))
         self._log_message(f"Всего строк к распределению: {total_rows:,}", QColor("blue"))
 
     def _on_split_distribution_error(self, error):
@@ -350,11 +512,29 @@ class TSVConverterApp:
         self._log_message(f"Ошибка анализа распределения: {error}", QColor("red"))
 
     def _on_split_column_selected(self, index: int):
-        """Обработчик выбора столбца для разделения."""
+        """Обработчик выбора столбца для разделения на листы."""
+        self._on_split_dimension_selected(index, "sheets")
+
+    def _on_file_split_column_selected(self, index: int):
+        """Обработчик выбора столбца для разделения на файлы."""
+        self._on_split_dimension_selected(index, "files")
+
+    def _on_split_dimension_selected(self, index: int, dimension: str):
+        """Общий обработчик выбора столбцов разделения."""
         if index <= 0:
             return
 
-        column = self.window.split_column_combo.currentText()
+        combo = (
+            self.window.file_split_column_combo
+            if dimension == "files"
+            else self.window.split_column_combo
+        )
+        storage = (
+            self.window._file_split_values
+            if dimension == "files"
+            else self.window._sheet_split_values
+        )
+        column = combo.currentText()
         if not self.window.file_list.count():
             return
 
@@ -378,31 +558,44 @@ class TSVConverterApp:
                 column=column,
                 filter_column=filter_col,
                 filter_values=filter_vals_list,
+                selected_values=list(storage.get(column, [])),
             )
 
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 selected = dialog.get_selected_values()
-                mode = dialog.get_split_mode()
-                self.window._selected_column_values[column] = selected
-                self.window._split_modes[column] = mode
+                storage[column] = selected
+                self._update_total_rows()
                 
                 # Показываем лоадер на главном окне
                 self.window._show_loading_overlay("Анализ распределения данных...")
+
+                file_split_col = self.window.file_split_column_combo.currentText()
+                sheet_split_col = self.window.split_column_combo.currentText()
+                file_split_values = (
+                    self.window._file_split_values.get(file_split_col, [])
+                    if file_split_col != "Не разделять на файлы"
+                    else []
+                )
+                sheet_split_values = (
+                    self.window._sheet_split_values.get(sheet_split_col, [])
+                    if sheet_split_col != "Не разделять на листы"
+                    else []
+                )
                 
                 # Запускаем подсчет
                 worker = LoadingWorker(
                     self._count_split_distribution_task,
                     file_paths,
-                    column,
-                    selected,
+                    file_split_col,
+                    file_split_values,
+                    sheet_split_col,
+                    sheet_split_values,
                     filter_col,
                     self.window._filter_values,
                     list(self.window._selected_output_columns),
                 )
                 
-                worker.finished.connect(
-                    lambda counts: self._on_split_distribution_calculated(counts, column, mode)
-                )
+                worker.finished.connect(self._on_split_distribution_calculated)
                 worker.error.connect(
                     lambda err: self._on_split_distribution_error(err)
                 )
@@ -412,11 +605,11 @@ class TSVConverterApp:
                 self._active_workers.append(worker)
                 worker.start()
             else:
-                self.window.split_column_combo.setCurrentIndex(0)
+                combo.setCurrentIndex(0)
 
         except Exception as e:
             self._log_message(f"Ошибка: {e}", QColor("red"))
-            self.window.split_column_combo.setCurrentIndex(0)
+            combo.setCurrentIndex(0)
 
     def _on_filter_column_selected(self, index: int):
         """Обработчик выбора столбца для фильтра."""
@@ -452,6 +645,7 @@ class TSVConverterApp:
                 column=column,
                 filter_column=filter_col,
                 filter_values=filter_vals,
+                selected_values=list(self.window._filter_values.get(column, [])),
             )
 
             if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -497,6 +691,8 @@ class TSVConverterApp:
             auto_delete=config.auto_delete,
             styles=config.styles,
             header_color=config.header_color,
+            file_split_column=config.file_split_column,
+            file_split_values=config.file_split_values,
             split_column=config.split_column,
             split_mode=config.split_mode,
             selected_values=config.selected_values,
@@ -815,7 +1011,8 @@ class TSVConverterApp:
             <tr><td>Файлов в списке</td><td>{self.window.file_list.count()}</td></tr>
             <tr><td>Формат вывода</td><td>{self.window.format_combo.currentText()}</td></tr>
             <tr><td>Папка сохранения</td><td>{self.window.output_path_edit.text() or "Не указана"}</td></tr>
-            <tr><td>Разделение по столбцу</td><td>{self.window.split_column_combo.currentText()}</td></tr>
+            <tr><td>Разделение на файлы по столбцу</td><td>{self.window.file_split_column_combo.currentText()}</td></tr>
+            <tr><td>Разделение на листы по столбцу</td><td>{self.window.split_column_combo.currentText()}</td></tr>
             <tr><td>Фильтр по столбцу</td><td>{self.window.filter_column_combo.currentText()}</td></tr>
         </table>
         
