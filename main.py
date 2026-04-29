@@ -395,7 +395,7 @@ class TSVConverterApp:
                         for row in reader:
                             # Фильтр
                             if filter_idx is not None:
-                                if filter_idx < len(row) and row[filter_idx] not in filter_vals:
+                                if filter_idx >= len(row) or row[filter_idx] not in filter_vals:
                                     continue
 
                             file_key = ""

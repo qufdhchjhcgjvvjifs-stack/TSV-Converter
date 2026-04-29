@@ -480,7 +480,6 @@ class TSVToExcelConverter(QThread):
         self.selected_columns = selected_columns or []
         self.deduplicate_rows = deduplicate_rows
         self._timing = {}
-        self._timing_total = 0.0
         self.ram_threshold = ram_threshold
 
         self.stop_flag = False
@@ -503,7 +502,6 @@ class TSVToExcelConverter(QThread):
             self.log_message.emit("Начало конвертации...", QColor("blue"))
             self.processed_rows = 0
             self._timing = {}
-            self._timing_total = 0.0
             self.generated_files = []
             self.duplicates_removed = 0
             self._deduplication_was_used = False
@@ -558,7 +556,6 @@ class TSVToExcelConverter(QThread):
 
             # Финальный отчёт
             total_time = time.time() - t0
-            self._timing_total = total_time
             self._log_timing_summary(total_time)
             if self._deduplication_was_used:
                 self.log_message.emit(
@@ -1509,7 +1506,7 @@ class TSVToExcelConverter(QThread):
                 if row_num % self.STOP_CHECK_INTERVAL == 0 and self.stop_flag:
                     break
 
-                if filter_idx < len(row) and row[filter_idx] not in filter_vals:
+                if filter_idx >= len(row) or row[filter_idx] not in filter_vals:
                     continue
 
                 if row_handler(row) is False:
@@ -1772,7 +1769,6 @@ class TSVToExcelConverter(QThread):
         row_counts: Dict[str, Dict[str, int]] = defaultdict(dict)
         used_file_names: Set[str] = set()
         used_sheet_names: Dict[str, Set[str]] = defaultdict(set)
-        file_paths: Dict[str, str] = {}
         output_files: List[str] = []
         hierarchy_counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
 
@@ -1800,7 +1796,6 @@ class TSVToExcelConverter(QThread):
             file_path = os.path.join(
                 self.output_directory, f"{base_name}_{safe_value}.xlsx"
             )
-            file_paths[file_value] = file_path
 
             if use_constant_memory:
                 workbook = xlsxwriter.Workbook(
