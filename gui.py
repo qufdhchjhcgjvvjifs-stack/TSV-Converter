@@ -2425,6 +2425,7 @@ class TSVPreviewDialog(QDialog):
     def __init__(self, file_path: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Предпросмотр: {os.path.basename(file_path)}")
+        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
         self.setMinimumSize(800, 600)
         self.setModal(True)
 
