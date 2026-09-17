@@ -1191,6 +1191,20 @@ class ColumnCheckBoxListWidget(QListWidget):
         return Qt.CheckState.Unchecked
 
 
+class ExcelValuesWorker(QThread):
+    def __init__(self, file_path: str, parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self.values: Set[str] = set()
+        self.error_message = ""
+
+    def run(self):
+        try:
+            self.values = FileUtilities.read_excel_values(self.file_path)
+        except Exception as error:
+            self.error_message = str(error)
+
+
 class ColumnValuesDialog(QDialog):
     """
     Диалог выбора значений столбца.
@@ -1224,6 +1238,8 @@ class ColumnValuesDialog(QDialog):
         self._filter_values = filter_values or []
         self._selected_values = set(selected_values or [])
         self._worker = None
+        self._excel_worker: Optional[ExcelValuesWorker] = None
+        self._is_loading = False
 
         # Сначала инициализируем UI
         self._init_ui()
@@ -1266,6 +1282,20 @@ class ColumnValuesDialog(QDialog):
 
         layout.addWidget(self.value_list)
 
+        self.import_excel_btn = SecondaryButton("Отметить из Excel...")
+        self.import_excel_btn.setToolTip(
+            "Столбец A первого листа, начиная с A1, без заголовка. "
+            "Точное совпадение с учётом регистра и пробелов. "
+            "Текущий выбор сохраняется; поиск не ограничивает импорт. "
+            "Коды с ведущими нулями храните как текст. Формулы не поддерживаются."
+        )
+        self.import_excel_btn.clicked.connect(self._import_excel)
+        layout.addWidget(self.import_excel_btn)
+
+        self.import_info_label = QLabel()
+        self.import_info_label.setWordWrap(True)
+        layout.addWidget(self.import_info_label)
+
         # Инфо
         self.info_label = QLabel("Выбрано: 0")
         layout.addWidget(self.info_label)
@@ -1290,6 +1320,77 @@ class ColumnValuesDialog(QDialog):
         layout.addLayout(button_layout)
 
         self._update_info()
+
+    def _import_excel(self):
+        if self._is_loading:
+            return
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Выберите Excel со значениями в столбце A", "", "Excel (*.xlsx)"
+        )
+        if not file_path:
+            return
+        self.import_info_label.clear()
+        self._show_loading()
+        self._loading_overlay.set_text("Чтение значений из Excel...")
+        self._excel_worker = ExcelValuesWorker(file_path, self)
+        self._excel_worker.finished.connect(self._on_excel_loaded)
+        self._excel_worker.start()
+
+    @Slot()
+    def _on_excel_loaded(self):
+        worker = self._excel_worker
+        if worker is None:
+            return
+        values = worker.values
+        error_message = worker.error_message
+        self._excel_worker = None
+        worker.deleteLater()
+        if error_message:
+            self._hide_loading()
+            msgbox = QMessageBox(
+                QMessageBox.Icon.Warning,
+                "Ошибка импорта Excel",
+                f"Не удалось прочитать шаблон:\n{error_message}",
+                QMessageBox.StandardButton.Ok,
+                self,
+            )
+            apply_theme_to_messagebox(msgbox, self._is_dark)
+            msgbox.exec()
+            return
+        self._apply_excel_values(values)
+        self._hide_loading()
+
+    def _apply_excel_values(self, values: Set[str]):
+        matched = set()
+        added = 0
+        for row in range(self.value_list.count()):
+            value = self.value_list.item(row).text()
+            if value in values:
+                matched.add(value)
+                if self.value_list.get_item_check_state(row) != Qt.CheckState.Checked:
+                    added += 1
+                self.value_list._check_states[row] = Qt.CheckState.Checked
+        self.value_list.viewport().update()
+        self._update_info()
+        self.import_info_label.setText(
+            f"Уникальных значений в шаблоне: {len(values)}. "
+            f"Найдено: {len(matched)}, новых отметок: {added}, "
+            f"не найдено: {len(values - matched)}."
+        )
+
+    def accept(self):
+        if not self._is_loading:
+            super().accept()
+
+    def reject(self):
+        if not self._is_loading:
+            super().reject()
+
+    def closeEvent(self, event):
+        if self._is_loading:
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _load_values_async(self):
         """Загружает значения асинхронно через worker."""
@@ -1328,16 +1429,20 @@ class ColumnValuesDialog(QDialog):
 
     def _show_loading(self):
         """Показывает лоадер."""
+        self._is_loading = True
         self._loading_overlay.resize(self.size())
         self._loading_overlay.start_animation()
         self.value_list.setEnabled(False)
         self.search_edit.setEnabled(False)
+        self.import_excel_btn.setEnabled(False)
 
     def _hide_loading(self):
         """Скрывает лоадер."""
+        self._is_loading = False
         self._loading_overlay.stop_animation()
         self.value_list.setEnabled(True)
         self.search_edit.setEnabled(True)
+        self.import_excel_btn.setEnabled(True)
 
     def load_values(self, values: Set[str]):
         """Загружает значения в список."""

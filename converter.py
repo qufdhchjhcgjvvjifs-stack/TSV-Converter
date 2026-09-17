@@ -213,6 +213,30 @@ class FileUtilities:
     """
 
     @staticmethod
+    def read_excel_values(file_path: str) -> Set[str]:
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(file_path, read_only=True, data_only=False)
+        try:
+            if not workbook.worksheets:
+                raise ValueError("В книге нет листов с данными")
+            worksheet = workbook.worksheets[0]
+            worksheet.reset_dimensions()
+            values: Set[str] = set()
+            for (cell,) in worksheet.iter_rows(min_col=1, max_col=1):
+                if cell.data_type in ("f", "e"):
+                    raise ValueError(
+                        "Столбец A должен содержать значения, а не формулы или ошибки Excel"
+                    )
+                if cell.value is not None:
+                    value = str(cell.value)
+                    if value.strip():
+                        values.add(value)
+            return values
+        finally:
+            workbook.close()
+
+    @staticmethod
     def get_encoding(file_path: str) -> str:
         """
         Определяет кодировку файла по BOM или содержимому.
