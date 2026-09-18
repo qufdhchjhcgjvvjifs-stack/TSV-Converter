@@ -45,6 +45,7 @@ class ConversionConfig:
     selected_columns: List[str] = field(default_factory=list)
     deduplicate_rows: bool = True
     ram_threshold: int = 500000
+    advanced_filters: Dict[str, List[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -233,6 +234,58 @@ class FileUtilities:
                     if value.strip():
                         values.add(value)
             return values
+        finally:
+            workbook.close()
+
+    @staticmethod
+    def read_excel_constraints(file_path: str) -> Dict[str, Set[str]]:
+        """Читает multi-ограничения из Excel: A=имя столбца, B=значение (И-логика)."""
+        from openpyxl import load_workbook
+
+        header_markers_a = {
+            "столбец",
+            "column",
+            "1 столбец",
+            "название столбца",
+            "имя столбца",
+        }
+        header_markers_b = {"значение", "value", "2 столбец"}
+
+        workbook = load_workbook(file_path, read_only=True, data_only=False)
+        try:
+            if not workbook.worksheets:
+                raise ValueError("В книге нет листов с данными")
+            worksheet = workbook.worksheets[0]
+            worksheet.reset_dimensions()
+            result: Dict[str, Set[str]] = defaultdict(set)
+            data_rows = 0
+            for row_idx, (cell_a, cell_b) in enumerate(
+                worksheet.iter_rows(min_col=1, max_col=2), start=1
+            ):
+                if cell_a.data_type in ("f", "e") or cell_b.data_type in ("f", "e"):
+                    raise ValueError(
+                        f"Строка {row_idx}: формулы и ошибки Excel не поддерживаются"
+                    )
+                raw_a = "" if cell_a.value is None else str(cell_a.value).strip()
+                raw_b = "" if cell_b.value is None else str(cell_b.value).strip()
+                if not raw_a and not raw_b:
+                    continue
+                if row_idx == 1 and (
+                    raw_a.lower() in header_markers_a
+                    or raw_b.lower() in header_markers_b
+                ):
+                    continue
+                if not raw_a:
+                    raise ValueError(
+                        f"Строка {row_idx}: пустое название столбца (A)"
+                    )
+                if not raw_b:
+                    continue
+                result[raw_a].add(raw_b)
+                data_rows += 1
+            if data_rows == 0:
+                raise ValueError("В файле нет ограничений (столбцы A и B пусты)")
+            return dict(result)
         finally:
             workbook.close()
 
@@ -483,6 +536,7 @@ class TSVToExcelConverter(QThread):
         selected_columns: Optional[List[str]] = None,
         deduplicate_rows: bool = True,
         ram_threshold: int = 500000,
+        advanced_filters: Optional[Dict[str, List[str]]] = None,
     ):
         super().__init__()
 
@@ -505,6 +559,11 @@ class TSVToExcelConverter(QThread):
         self.deduplicate_rows = deduplicate_rows
         self._timing = {}
         self.ram_threshold = ram_threshold
+        self.advanced_filters: Dict[str, Set[str]] = {
+            column: set(values)
+            for column, values in (advanced_filters or {}).items()
+            if values
+        }
 
         self.stop_flag = False
         self.output_file_path: Optional[str] = None
@@ -609,6 +668,32 @@ class TSVToExcelConverter(QThread):
             return "Остальные"
 
         return value
+
+    def _resolve_advanced_indices(
+        self, headers: List[str]
+    ) -> List[tuple[int, Set[str]]]:
+        """Строит (индекс, разрешённые значения) для multi-ограничений (И-логика)."""
+        if not self.advanced_filters:
+            return []
+        header_to_index: Dict[str, int] = {}
+        for index, header in enumerate(headers):
+            if header not in header_to_index:
+                header_to_index[header] = index
+        resolved: List[tuple[int, Set[str]]] = []
+        for column, values in self.advanced_filters.items():
+            if column in header_to_index and values:
+                resolved.append((header_to_index[column], set(values)))
+        return resolved
+
+    @staticmethod
+    def _passes_advanced(
+        row: List[str], adv_indices: List[tuple[int, Set[str]]]
+    ) -> bool:
+        """Проверяет И-ограничения: каждая пара (индекс, значения) должна совпасть."""
+        for idx, allowed in adv_indices:
+            if idx >= len(row) or row[idx] not in allowed:
+                return False
+        return True
 
     def _get_output_columns(self, headers: List[str]) -> tuple[List[str], List[int]]:
         """Возвращает заголовки и индексы столбцов для итогового файла."""
@@ -810,8 +895,11 @@ class TSVToExcelConverter(QThread):
                     )
                     seen_rows = set()
                     seen_rows_by_destination = defaultdict(set)
+                    adv_indices = self._resolve_advanced_indices(headers)
 
                     def should_count_row(row: List[str]) -> bool:
+                        if adv_indices and not self._passes_advanced(row, adv_indices):
+                            return False
                         file_split_value = None
                         if file_split_idx is not None:
                             file_split_value = self._get_split_value(
@@ -1012,6 +1100,7 @@ class TSVToExcelConverter(QThread):
         output_headers, output_indices = self._get_output_columns(headers)
         deduplicate_rows = self._should_deduplicate_rows(headers, output_indices)
         seen_rows = set()
+        adv_indices = self._resolve_advanced_indices(headers)
 
         with open(output_path, "w", encoding="utf-8-sig", newline="") as out_f:
             writer = csv.writer(out_f, delimiter=";")
@@ -1030,7 +1119,12 @@ class TSVToExcelConverter(QThread):
                 return True
 
             self._process_rows_with_progress(
-                reader, filter_idx, current_file, process_row, "Запись CSV..."
+                reader,
+                filter_idx,
+                current_file,
+                process_row,
+                "Запись CSV...",
+                adv_indices,
             )
 
         self.output_file_path = output_path
@@ -1050,6 +1144,7 @@ class TSVToExcelConverter(QThread):
         output_headers, output_indices = self._get_output_columns(headers)
         deduplicate_rows = self._should_deduplicate_rows(headers, output_indices)
         seen_rows_by_key = defaultdict(set)
+        adv_indices = self._resolve_advanced_indices(headers)
 
         def _create_csv_file(key: str):
             """Создаёт CSV файл и записывает заголовок."""
@@ -1097,7 +1192,12 @@ class TSVToExcelConverter(QThread):
 
         try:
             self._process_rows_with_progress(
-                reader, filter_idx, current_file, process_row, "Распределение по CSV..."
+                reader,
+                filter_idx,
+                current_file,
+                process_row,
+                "Распределение по CSV...",
+                adv_indices,
             )
         finally:
             for f in open_files.values():
@@ -1133,6 +1233,7 @@ class TSVToExcelConverter(QThread):
                 self.pivot_settings,
                 self.filter_column if self.filter_column != "Не фильтровать" else "",
                 self.filter_values,
+                self.advanced_filters,
             )
 
             if pivot_data:
@@ -1340,6 +1441,7 @@ class TSVToExcelConverter(QThread):
                             if self.filter_column != "Не фильтровать"
                             else "",
                             self.filter_values,
+                            self.advanced_filters,
                         )
 
                         if pivot_data:
@@ -1519,10 +1621,12 @@ class TSVToExcelConverter(QThread):
         current_file: str,
         row_handler,
         operation_name: str = "Запись данных...",
+        adv_indices: Optional[List[tuple[int, Set[str]]]] = None,
     ):
         """Обрабатывает строки с фильтрацией, остановкой и обновлением прогресса."""
         t_process = time.time()
         update_freq = max(1, self.total_rows // 100)
+        has_advanced = bool(adv_indices)
 
         if filter_idx is not None and self.filter_values:
             filter_vals = self.filter_values
@@ -1531,6 +1635,8 @@ class TSVToExcelConverter(QThread):
                     break
 
                 if filter_idx >= len(row) or row[filter_idx] not in filter_vals:
+                    continue
+                if has_advanced and not self._passes_advanced(row, adv_indices):
                     continue
 
                 if row_handler(row) is False:
@@ -1543,6 +1649,8 @@ class TSVToExcelConverter(QThread):
                 if row_num % self.STOP_CHECK_INTERVAL == 0 and self.stop_flag:
                     break
 
+                if has_advanced and not self._passes_advanced(row, adv_indices):
+                    continue
                 if row_handler(row) is False:
                     continue
                 self.processed_rows += 1
@@ -1571,6 +1679,7 @@ class TSVToExcelConverter(QThread):
         output_headers, output_indices = self._get_output_columns(headers)
         deduplicate_rows = self._should_deduplicate_rows(headers, output_indices)
         seen_rows_by_value = defaultdict(set)
+        adv_indices = self._resolve_advanced_indices(headers)
 
         def _create_sheet_with_headers(sheet_name: str):
             ws = workbook.add_worksheet(sheet_name)
@@ -1610,7 +1719,9 @@ class TSVToExcelConverter(QThread):
             sheet_row_counts[value] = current_row + 1
             return True
 
-        self._process_rows_with_progress(reader, filter_idx, current_file, process_row)
+        self._process_rows_with_progress(
+            reader, filter_idx, current_file, process_row, "Запись данных...", adv_indices
+        )
 
     def _convert_with_split_to_files(
         self,
@@ -1730,7 +1841,14 @@ class TSVToExcelConverter(QThread):
             open_row_counts[value] = row_count + 1
             return True
 
-        self._process_rows_with_progress(reader, filter_idx, current_file, process_row)
+        self._process_rows_with_progress(
+            reader,
+            filter_idx,
+            current_file,
+            process_row,
+            "Запись данных...",
+            self._resolve_advanced_indices(headers),
+        )
 
         self._emit_progress_update(current_file, "Сохранение файлов...", force=True)
         t_close_start = time.time()
@@ -1917,7 +2035,12 @@ class TSVToExcelConverter(QThread):
             return True
 
         self._process_rows_with_progress(
-            reader, filter_idx, current_file, process_row, "Распределение по файлам и листам..."
+            reader,
+            filter_idx,
+            current_file,
+            process_row,
+            "Распределение по файлам и листам...",
+            self._resolve_advanced_indices(headers),
         )
 
         if hierarchy_counts:
@@ -2013,7 +2136,14 @@ class TSVToExcelConverter(QThread):
             row_count += 1
             return True
 
-        self._process_rows_with_progress(reader, filter_idx, current_file, process_row)
+        self._process_rows_with_progress(
+            reader,
+            filter_idx,
+            current_file,
+            process_row,
+            "Запись данных...",
+            self._resolve_advanced_indices(headers),
+        )
 
     def stop(self):
         """Останавливает конвертацию."""
@@ -2039,6 +2169,7 @@ class PivotTableProcessor:
         settings: Dict[str, Any],
         filter_column: str = "",
         filter_values: Set[str] = None,
+        advanced_filters: Optional[Dict[str, List[str]]] = None,
     ) -> Optional[Dict]:
         """
         Создаёт данные для сводной таблицы.
@@ -2048,6 +2179,7 @@ class PivotTableProcessor:
             settings: Настройки сводной таблицы
             filter_column: Столбец для фильтра
             filter_values: Значения фильтра
+            advanced_filters: Multi-ограничения {столбец: [значения]} (И-логика)
 
         Returns:
             Словарь с данными сводной таблицы или None
@@ -2088,6 +2220,15 @@ class PivotTableProcessor:
                     except ValueError:
                         filter_idx = None
 
+                # Multi-ограничения (И-логика)
+                adv_indices: List[tuple[int, Set[str]]] = []
+                for column, values in (advanced_filters or {}).items():
+                    if values:
+                        try:
+                            adv_indices.append((headers.index(column), set(values)))
+                        except ValueError:
+                            continue
+
                 # Подготовка к удалению дубликатов
                 remove_duplicates = settings.get("remove_duplicates", False)
                 seen_combinations = set()
@@ -2127,6 +2268,16 @@ class PivotTableProcessor:
                         if filter_idx < len(row):
                             if row[filter_idx] not in filter_values:
                                 continue
+
+                    # Multi-ограничения (И)
+                    if adv_indices:
+                        passed = True
+                        for adv_idx, allowed in adv_indices:
+                            if adv_idx >= len(row) or row[adv_idx] not in allowed:
+                                passed = False
+                                break
+                        if not passed:
+                            continue
 
                     # Удаление дубликатов (на лету)
                     if remove_duplicates:

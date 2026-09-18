@@ -788,12 +788,18 @@ class UniqueValuesWorker(QThread):
         column: str,
         filter_column: str = "",
         filter_values: Optional[List[str]] = None,
+        extra_filters: Optional[Dict[str, List[str]]] = None,
     ):
         super().__init__()
         self.file_paths = file_paths
         self.column = column
         self.filter_column = filter_column
         self.filter_values = filter_values or []
+        self.extra_filters = {
+            column: set(values)
+            for column, values in (extra_filters or {}).items()
+            if values
+        }
 
         # Создаём сигналы через отдельный класс
         self.signals = UniqueValuesWorkerSignals()
@@ -828,6 +834,14 @@ class UniqueValuesWorker(QThread):
                             else:
                                 filter_vals = set(self.filter_values)
 
+                        # Multi-ограничения (И-логика)
+                        extra_indices = []
+                        for column, allowed in self.extra_filters.items():
+                            try:
+                                extra_indices.append((headers.index(column), allowed))
+                            except ValueError:
+                                continue
+
                         # Собираем уникальные значения
                         for row in reader:
                             if col_idx < len(row):
@@ -836,6 +850,15 @@ class UniqueValuesWorker(QThread):
                                     if filter_idx < len(row):
                                         if row[filter_idx] not in filter_vals:
                                             continue
+
+                                if extra_indices:
+                                    passed = True
+                                    for extra_idx, allowed in extra_indices:
+                                        if extra_idx >= len(row) or row[extra_idx] not in allowed:
+                                            passed = False
+                                            break
+                                    if not passed:
+                                        continue
 
                                 value = row[col_idx]
                                 if value.strip():
@@ -1220,6 +1243,7 @@ class ColumnValuesDialog(QDialog):
         filter_column: str = "",
         filter_values: Optional[List[str]] = None,
         selected_values: Optional[List[str]] = None,
+        extra_filters: Optional[Dict[str, List[str]]] = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Выберите значения")
@@ -1237,6 +1261,7 @@ class ColumnValuesDialog(QDialog):
         self._filter_column = filter_column
         self._filter_values = filter_values or []
         self._selected_values = set(selected_values or [])
+        self._extra_filters = dict(extra_filters or {})
         self._worker = None
         self._excel_worker: Optional[ExcelValuesWorker] = None
         self._is_loading = False
@@ -1397,7 +1422,11 @@ class ColumnValuesDialog(QDialog):
         self._show_loading()
 
         self._worker = UniqueValuesWorker(
-            self._file_paths, self._column, self._filter_column, self._filter_values
+            self._file_paths,
+            self._column,
+            self._filter_column,
+            self._filter_values,
+            self._extra_filters,
         )
         self._worker.signals.finished.connect(self._on_values_loaded)
         self._worker.signals.error.connect(self._on_values_error)
@@ -2103,16 +2132,30 @@ class PivotPreviewDialog(QDialog):
             self.reject()
             return
 
+        main_window = self.parent()
+        advanced = {}
+        if main_window is not None and hasattr(
+            main_window, "get_combined_advanced_filters"
+        ):
+            try:
+                advanced = main_window.get_combined_advanced_filters()
+            except Exception:
+                advanced = {}
+
         self._show_loading()
         self._worker = LoadingWorker(
-            self._build_pivot_preview_data, file_path, dict(self._settings)
+            self._build_pivot_preview_data, file_path, dict(self._settings), advanced
         )
         self._worker.finished.connect(self._on_preview_loaded)
         self._worker.error.connect(self._on_preview_error)
         self._worker.start()
 
     @staticmethod
-    def _build_pivot_preview_data(file_path: str, settings: Dict[str, Any]):
+    def _build_pivot_preview_data(
+        file_path: str,
+        settings: Dict[str, Any],
+        advanced_filters: Optional[Dict[str, List[str]]] = None,
+    ):
         """Строит данные сводной таблицы в фоне."""
         from converter import PivotTableProcessor
         import traceback
@@ -2122,7 +2165,7 @@ class PivotPreviewDialog(QDialog):
             filter_col = settings.get("filter_column", "")
             filter_vals = settings.get("filter_values", [])
             return processor.create_pivot_data(
-                file_path, settings, filter_col, filter_vals
+                file_path, settings, filter_col, filter_vals, advanced_filters or {}
             )
         except Exception as e:
             raise RuntimeError(
@@ -2826,11 +2869,12 @@ class MainWindow(QMainWindow):
     export_report_requested = Signal()
     settings_saved = Signal(dict)
     columns_changed = Signal()
+    advanced_filters_changed = Signal(str)  # dimension: filter/files/sheets
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Конвертер TSV/CSV в Excel")
-        self.setMinimumWidth(900)  # Только ширина, высоту контролирует layout
+        self.setMinimumWidth(980)  # +80px под кнопки ... рядом с комбобоксами
 
         # Хранилище состояния
         self._settings: Dict[str, Any] = {}
@@ -2844,6 +2888,10 @@ class MainWindow(QMainWindow):
         self._pivot_settings: Optional[Dict[str, Any]] = None
         self._available_headers: List[str] = []
         self._selected_output_columns: List[str] = []
+        # Multi-ограничения из Excel (И-логика): dimension -> {столбец: [значения]}
+        self._adv_filter_map: Dict[str, List[str]] = {}
+        self._adv_file_split_map: Dict[str, List[str]] = {}
+        self._adv_sheet_split_map: Dict[str, List[str]] = {}
 
         # Для обновления прогресса
 
@@ -2997,7 +3045,13 @@ class MainWindow(QMainWindow):
         layout = QGridLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setVerticalSpacing(10)
-        layout.setHorizontalSpacing(16)
+        layout.setHorizontalSpacing(12)
+        # Растяжение: комбобоксы сжимаются первыми, кнопки ... и метки — фиксированы.
+        layout.setColumnStretch(0, 0)
+        layout.setColumnStretch(1, 1)
+        layout.setColumnStretch(2, 0)
+        layout.setColumnStretch(3, 1)
+        layout.setColumnStretch(4, 0)
 
         # Строка 1: Формат и директория
         layout.addWidget(QLabel("Формат:"), 0, 0)
@@ -3018,18 +3072,87 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Разделить на файлы по столбцу:"), 1, 0)
         self.file_split_column_combo = QComboBox()
         self.file_split_column_combo.addItem("Не разделять на файлы")
-        layout.addWidget(self.file_split_column_combo, 1, 1)
+        file_split_box = QWidget()
+        file_split_box.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        file_split_layout = QHBoxLayout(file_split_box)
+        file_split_layout.setContentsMargins(0, 0, 0, 0)
+        file_split_layout.setSpacing(4)
+        file_split_layout.addWidget(self.file_split_column_combo, 1)
+        self.file_split_options_btn = SecondaryButton("...")
+        self.file_split_options_btn.setFixedWidth(32)
+        self.file_split_options_btn.setMinimumHeight(
+            self.file_split_column_combo.sizeHint().height()
+        )
+        self.file_split_options_btn.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        self.file_split_options_btn.setToolTip(
+            "Multi-ограничения из Excel для разделения на файлы (И-логика)"
+        )
+        self.file_split_options_btn.clicked.connect(
+            lambda: self._choose_advanced_constraints("files")
+        )
+        file_split_layout.addWidget(self.file_split_options_btn)
+        layout.addWidget(file_split_box, 1, 1)
 
         layout.addWidget(QLabel("Разделить на листы по столбцу:"), 1, 2)
         self.split_column_combo = QComboBox()
         self.split_column_combo.addItem("Не разделять на листы")
-        layout.addWidget(self.split_column_combo, 1, 3)
+        sheet_split_box = QWidget()
+        sheet_split_box.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        sheet_split_layout = QHBoxLayout(sheet_split_box)
+        sheet_split_layout.setContentsMargins(0, 0, 0, 0)
+        sheet_split_layout.setSpacing(4)
+        sheet_split_layout.addWidget(self.split_column_combo, 1)
+        self.sheet_split_options_btn = SecondaryButton("...")
+        self.sheet_split_options_btn.setFixedWidth(32)
+        self.sheet_split_options_btn.setMinimumHeight(
+            self.split_column_combo.sizeHint().height()
+        )
+        self.sheet_split_options_btn.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        self.sheet_split_options_btn.setToolTip(
+            "Multi-ограничения из Excel для разделения на листы (И-логика)"
+        )
+        self.sheet_split_options_btn.clicked.connect(
+            lambda: self._choose_advanced_constraints("sheets")
+        )
+        sheet_split_layout.addWidget(self.sheet_split_options_btn)
+        layout.addWidget(sheet_split_box, 1, 3)
 
         # Строка 3: фильтр и выбор итоговых столбцов
         layout.addWidget(QLabel("Фильтр по столбцу:"), 2, 0)
         self.filter_column_combo = QComboBox()
         self.filter_column_combo.addItem("Не фильтровать")
-        layout.addWidget(self.filter_column_combo, 2, 1)
+        filter_box = QWidget()
+        filter_box.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        filter_layout = QHBoxLayout(filter_box)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.setSpacing(4)
+        filter_layout.addWidget(self.filter_column_combo, 1)
+        self.filter_options_btn = SecondaryButton("...")
+        self.filter_options_btn.setFixedWidth(32)
+        self.filter_options_btn.setMinimumHeight(
+            self.filter_column_combo.sizeHint().height()
+        )
+        self.filter_options_btn.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        self.filter_options_btn.setToolTip(
+            "Multi-ограничения из Excel для фильтра (И-логика)"
+        )
+        self.filter_options_btn.clicked.connect(
+            lambda: self._choose_advanced_constraints("filter")
+        )
+        filter_layout.addWidget(self.filter_options_btn)
+        layout.addWidget(filter_box, 2, 1)
 
         layout.addWidget(QLabel("Столбцы вывода:"), 2, 2)
         self.columns_btn = SecondaryButton("Настроить...")
@@ -3297,14 +3420,15 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, row_count)
             self.file_list.addItem(item)
 
-        # Обновляем состояние комбобоксов split/filter (блокируем при нескольких файлах)
-        self._update_split_filter_state()
-
         # Обновляем комбобоксы столбцов (только если нет заголовков или есть новые)
         if headers:
             existing_count = self.file_list.count() - len(files_with_rows)
             if existing_count == 0:
                 self._update_column_combos(headers)
+
+        # Обновляем состояние комбобоксов split/filter (блокируем при нескольких файлах)
+        # Порядок важен: сначала заголовки, иначе кнопки ... останутся выключенными.
+        self._update_split_filter_state()
 
         # Обновляем количество строк (прибавляем к существующему)
         current_text = self.total_rows_label.text()
@@ -3350,6 +3474,9 @@ class MainWindow(QMainWindow):
             self._sheet_split_values.clear()
             self._filter_values.clear()
             self._pivot_settings = None
+            self._adv_filter_map = {}
+            self._adv_file_split_map = {}
+            self._adv_sheet_split_map = {}
 
         combo_headers = self._get_active_output_columns()
         combo_header_set = set(combo_headers)
@@ -3362,6 +3489,7 @@ class MainWindow(QMainWindow):
         for column in list(self._filter_values):
             if column not in combo_header_set:
                 self._filter_values.pop(column, None)
+        self._prune_advanced_maps(set(self._available_headers))
 
         # Очищаем
         self.file_split_column_combo.blockSignals(True)
@@ -3392,6 +3520,12 @@ class MainWindow(QMainWindow):
         if hasattr(self, "columns_btn"):
             self.columns_btn.setEnabled(self.file_list.count() == 1 and bool(headers))
         self._update_columns_info()
+        # Синхронизируем доступность кнопок ... с наличием заголовков.
+        if hasattr(self, "filter_options_btn"):
+            options_enabled = self.file_list.count() == 1 and bool(headers)
+            self.file_split_options_btn.setEnabled(options_enabled)
+            self.sheet_split_options_btn.setEnabled(options_enabled)
+            self.filter_options_btn.setEnabled(options_enabled)
 
     def _get_active_output_columns(self) -> List[str]:
         """Возвращает столбцы, доступные для дальнейших настроек вывода."""
@@ -3451,6 +3585,7 @@ class MainWindow(QMainWindow):
 
         # Существующие настройки сводной могут ссылаться на исключённые столбцы.
         self._pivot_settings = None
+        self._prune_advanced_maps(active_set)
 
     def _on_files_processing_error(self, error: str):
         """Обработчик ошибки обработки файлов."""
@@ -3474,6 +3609,7 @@ class MainWindow(QMainWindow):
     def _update_split_filter_state(self):
         """Обновляет состояние комбобоксов split/filter в зависимости от количества файлов."""
         file_count = self.file_list.count()
+        has_options_btns = hasattr(self, "filter_options_btn")
         if file_count > 1:
             self.file_split_column_combo.setEnabled(False)
             self.split_column_combo.setEnabled(False)
@@ -3490,6 +3626,10 @@ class MainWindow(QMainWindow):
                 "Функция недоступна при загрузке нескольких файлов. "
                 "Split/filter работает только для одного файла."
             )
+            if has_options_btns:
+                self.file_split_options_btn.setEnabled(False)
+                self.sheet_split_options_btn.setEnabled(False)
+                self.filter_options_btn.setEnabled(False)
             self.columns_btn.setEnabled(False)
             self.columns_btn.setToolTip(
                 "Функция доступна только при загрузке одного файла."
@@ -3501,6 +3641,11 @@ class MainWindow(QMainWindow):
             self.file_split_column_combo.setToolTip("")
             self.split_column_combo.setToolTip("")
             self.filter_column_combo.setToolTip("")
+            if has_options_btns:
+                enabled = file_count == 1 and bool(self._available_headers)
+                self.file_split_options_btn.setEnabled(enabled)
+                self.sheet_split_options_btn.setEnabled(enabled)
+                self.filter_options_btn.setEnabled(enabled)
             self.columns_btn.setEnabled(file_count == 1 and bool(self._available_headers))
             self.columns_btn.setToolTip("")
 
@@ -3597,6 +3742,169 @@ class MainWindow(QMainWindow):
             f"Столбцов: {selected_count} из {len(self._available_headers)}"
         )
 
+    def get_combined_advanced_filters(self) -> Dict[str, List[str]]:
+        """Объединяет три маппинга ... в один (И-логика, пересечение по столбцу)."""
+        combined: Dict[str, Set[str]] = {}
+        for mapping in (
+            self._adv_filter_map,
+            self._adv_file_split_map,
+            self._adv_sheet_split_map,
+        ):
+            for column, values in mapping.items():
+                value_set = set(values)
+                if not value_set:
+                    continue
+                if column in combined:
+                    combined[column] &= value_set
+                else:
+                    combined[column] = set(value_set)
+        return {column: sorted(values) for column, values in combined.items() if values}
+
+    def _get_adv_map(self, dimension: str) -> Dict[str, List[str]]:
+        if dimension == "files":
+            return self._adv_file_split_map
+        if dimension == "sheets":
+            return self._adv_sheet_split_map
+        return self._adv_filter_map
+
+    def _set_adv_map(self, dimension: str, mapping: Dict[str, List[str]]):
+        if dimension == "files":
+            self._adv_file_split_map = mapping
+        elif dimension == "sheets":
+            self._adv_sheet_split_map = mapping
+        else:
+            self._adv_filter_map = mapping
+
+    def _summarize_adv_map(self, mapping: Dict[str, List[str]]) -> str:
+        parts = [f"{col}: {len(vals)} зн." for col, vals in sorted(mapping.items())]
+        return "; ".join(parts)
+
+    def _update_options_buttons(self):
+        """Обновляет подсказки и маркер активности кнопок ...."""
+        for dimension, attr in (
+            ("files", "file_split_options_btn"),
+            ("sheets", "sheet_split_options_btn"),
+            ("filter", "filter_options_btn"),
+        ):
+            btn = getattr(self, attr, None)
+            if btn is None:
+                continue
+            mapping = self._get_adv_map(dimension)
+            if mapping:
+                btn.setText("...•")
+                btn.setToolTip(f"Активно: {self._summarize_adv_map(mapping)} (нажмите для замены/очистки)")
+            else:
+                btn.setText("...")
+                hints = {
+                    "files": "Multi-ограничения из Excel для разделения на файлы (И-логика)",
+                    "sheets": "Multi-ограничения из Excel для разделения на листы (И-логика)",
+                    "filter": "Multi-ограничения из Excel для фильтра (И-логика)",
+                }
+                btn.setToolTip(hints[dimension])
+
+    def _prune_advanced_maps(self, valid_columns: Set[str]):
+        """Удаляет из multi-ограничений столбцы, которых больше нет в данных."""
+        for dimension in ("filter", "files", "sheets"):
+            mapping = self._get_adv_map(dimension)
+            pruned = {
+                column: values
+                for column, values in mapping.items()
+                if column in valid_columns
+            }
+            if len(pruned) != len(mapping):
+                self._set_adv_map(dimension, pruned)
+        self._update_options_buttons()
+
+    def _choose_advanced_constraints(self, dimension: str):
+        """Загрузка multi-ограничений (A=столбец, B=значение) из Excel."""
+        if self.file_list.count() != 1:
+            msgbox = self._show_message_box(
+                QMessageBox.Icon.Warning,
+                "Предупреждение",
+                "Multi-ограничения доступны только для одного добавленного файла",
+            )
+            msgbox.exec()
+            return
+        titles = {
+            "filter": "Фильтр",
+            "files": "Разделение на файлы",
+            "sheets": "Разделение на листы",
+        }
+        current = self._get_adv_map(dimension)
+        if current:
+            msgbox = self._show_message_box(
+                QMessageBox.Icon.Question,
+                "Multi-ограничения",
+                f"Уже активно ({titles.get(dimension, dimension)}): "
+                f"{self._summarize_adv_map(current)}\nЗаменить файлом, очистить или оставить?",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+            )
+            msgbox.button(QMessageBox.StandardButton.Yes).setText("Заменить")
+            msgbox.button(QMessageBox.StandardButton.No).setText("Очистить")
+            msgbox.button(QMessageBox.StandardButton.Cancel).setText("Отмена")
+            reply = msgbox.exec()
+            if reply == QMessageBox.StandardButton.No:
+                self._set_adv_map(dimension, {})
+                self._update_options_buttons()
+                self.log_message(
+                    f"Multi-ограничения [{titles.get(dimension, dimension)}] очищены",
+                    QColor("orange"),
+                )
+                self.advanced_filters_changed.emit(dimension)
+                return
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите Excel с ограничениями (A=столбец, B=значение)",
+            "",
+            "Excel файлы (*.xlsx);;Все файлы (*.*)",
+        )
+        if not file_path:
+            return
+        try:
+            loaded = FileUtilities.read_excel_constraints(file_path)
+        except Exception as error:
+            msgbox = self._show_message_box(
+                QMessageBox.Icon.Warning,
+                "Ошибка импорта ограничений",
+                f"Не удалось прочитать файл:\n{error}",
+            )
+            msgbox.exec()
+            return
+
+        unknown = [col for col in loaded if col not in set(self._available_headers)]
+        if unknown:
+            msgbox = self._show_message_box(
+                QMessageBox.Icon.Warning,
+                "Неизвестные столбцы",
+                "Не найдены в данных и будут пропущены:\n" + ", ".join(sorted(unknown)),
+            )
+            msgbox.exec()
+            loaded = {col: vals for col, vals in loaded.items() if col not in unknown}
+        if not loaded:
+            msgbox = self._show_message_box(
+                QMessageBox.Icon.Warning,
+                "Предупреждение",
+                "Нет подходящих ограничений для текущих столбцов",
+            )
+            msgbox.exec()
+            return
+
+        self._set_adv_map(
+            dimension, {column: sorted(values) for column, values in loaded.items()}
+        )
+        self._update_options_buttons()
+        self.log_message(
+            f"Multi-ограничения [{titles.get(dimension, dimension)}]: "
+            f"{self._summarize_adv_map(loaded)}",
+            QColor("green"),
+        )
+        self.advanced_filters_changed.emit(dimension)
+
     def _start_conversion(self):
         """Запуск конвертации."""
         # Валидация
@@ -3673,6 +3981,9 @@ class MainWindow(QMainWindow):
             selected_columns=selected_columns,
             deduplicate_rows=True,
             ram_threshold=self._settings.get("ram_threshold", 500000),
+            advanced_filters=self.get_combined_advanced_filters()
+            if len(files) == 1
+            else {},
         )
 
         # Сигнал для бизнес-логики

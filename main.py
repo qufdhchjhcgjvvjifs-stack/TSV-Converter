@@ -85,6 +85,7 @@ class TSVConverterApp:
         # Сигналы
         self.window.settings_saved.connect(self._on_settings_saved)
         self.window.columns_changed.connect(self._on_columns_changed)
+        self.window.advanced_filters_changed.connect(self._on_advanced_filters_changed)
 
         # Комбобоксы
         self.window.file_split_column_combo.currentIndexChanged.connect(
@@ -169,6 +170,7 @@ class TSVConverterApp:
         selected_columns = (
             list(self.window._selected_output_columns) if len(files) == 1 else []
         )
+        advanced_filters = self._get_combined_advanced_filters()
 
         # Обновляем UI
         self.window.total_rows_label.setText("Строк: Подсчет...")
@@ -184,6 +186,7 @@ class TSVConverterApp:
             sheet_split_col,
             sheet_split_values,
             selected_columns,
+            advanced_filters,
         )
         worker.finished.connect(
             lambda total: self.window.total_rows_label.setText(f"Строк: {total:,}")
@@ -211,11 +214,13 @@ class TSVConverterApp:
         sheet_split_col="",
         sheet_split_values=None,
         selected_columns=None,
+        advanced_filters=None,
     ):
         """Фоновая задача подсчета строк."""
         file_split_values = file_split_values or {}
         sheet_split_values = sheet_split_values or {}
         selected_columns = selected_columns or []
+        advanced_filters = advanced_filters or {}
         total = 0
         for file_path in files:
             try:
@@ -231,6 +236,7 @@ class TSVConverterApp:
                 output_indices = None
                 seen_rows = set()
                 seen_rows_by_destination = defaultdict(set)
+                adv_indices = []
 
                 with open(file_path, "r", encoding=encoding, errors="replace") as f:
                     reader = csv.reader(f, delimiter=delimiter)
@@ -257,6 +263,13 @@ class TSVConverterApp:
                         except ValueError:
                             sheet_split_idx = None
 
+                    for column, values in advanced_filters.items():
+                        if values:
+                            try:
+                                adv_indices.append((headers.index(column), set(values)))
+                            except ValueError:
+                                continue
+
                     if selected_columns and len(selected_columns) < len(headers):
                         header_to_index = {}
                         for index, header in enumerate(headers):
@@ -269,6 +282,14 @@ class TSVConverterApp:
                         ]
 
                     for row in reader:
+                        if adv_indices:
+                            passed = True
+                            for adv_idx, allowed in adv_indices:
+                                if adv_idx >= len(row) or row[adv_idx] not in allowed:
+                                    passed = False
+                                    break
+                            if not passed:
+                                continue
                         if filter_idx is not None and filter_vals:
                             if filter_idx >= len(row) or row[filter_idx] not in filter_vals:
                                 continue
@@ -320,6 +341,29 @@ class TSVConverterApp:
         self._update_total_rows()
         self._update_pivot_settings_filter()
 
+    def _get_combined_advanced_filters(self) -> dict:
+        """Возвращает объединённые multi-ограничения из GUI (И-логика)."""
+        try:
+            return dict(self.window.get_combined_advanced_filters())
+        except Exception:
+            return {}
+
+    def _on_advanced_filters_changed(self, dimension: str):
+        """Обработчик загрузки/очистки multi-ограничений через кнопку ...."""
+        titles = {"filter": "Фильтр", "files": "Разделение на файлы", "sheets": "Разделение на листы"}
+        combined = self._get_combined_advanced_filters()
+        if combined:
+            summary = "; ".join(
+                f"{column}: {len(values)} зн."
+                for column, values in sorted(combined.items())
+            )
+            self._log_message(
+                f"Активные multi-ограничения [{titles.get(dimension, dimension)}]: {summary}",
+                QColor("blue"),
+            )
+        self._update_total_rows()
+        self._update_pivot_settings_filter()
+
     @staticmethod
     def _count_split_distribution_task(
         files,
@@ -330,12 +374,14 @@ class TSVConverterApp:
         filter_col,
         filter_values_dict,
         selected_columns=None,
+        advanced_filters=None,
     ):
         """Фоновая задача подсчета распределения строк по значениям разделения."""
         counts = defaultdict(lambda: defaultdict(int))
         file_selected_set = set(file_split_values)
         sheet_selected_set = set(sheet_split_values)
         selected_columns = selected_columns or []
+        advanced_filters = advanced_filters or {}
         seen_rows_by_destination = defaultdict(set)
         total_rows = 0
         
@@ -391,8 +437,24 @@ class TSVConverterApp:
                                 filter_idx = headers.index(filter_col)
                             except ValueError:
                                 filter_idx = None
+
+                        adv_indices = []
+                        for column, values in advanced_filters.items():
+                            if values:
+                                try:
+                                    adv_indices.append((headers.index(column), set(values)))
+                                except ValueError:
+                                    continue
                         
                         for row in reader:
+                            if adv_indices:
+                                passed = True
+                                for adv_idx, allowed in adv_indices:
+                                    if adv_idx >= len(row) or row[adv_idx] not in allowed:
+                                        passed = False
+                                        break
+                                if not passed:
+                                    continue
                             # Фильтр
                             if filter_idx is not None:
                                 if filter_idx >= len(row) or row[filter_idx] not in filter_vals:
@@ -559,6 +621,7 @@ class TSVConverterApp:
                 filter_column=filter_col,
                 filter_values=filter_vals_list,
                 selected_values=list(storage.get(column, [])),
+                extra_filters=self._get_combined_advanced_filters(),
             )
 
             if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -593,6 +656,7 @@ class TSVConverterApp:
                     filter_col,
                     self.window._filter_values,
                     list(self.window._selected_output_columns),
+                    self._get_combined_advanced_filters(),
                 )
                 
                 worker.finished.connect(self._on_split_distribution_calculated)
@@ -646,6 +710,7 @@ class TSVConverterApp:
                 filter_column=filter_col,
                 filter_values=filter_vals,
                 selected_values=list(self.window._filter_values.get(column, [])),
+                extra_filters=self._get_combined_advanced_filters(),
             )
 
             if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -702,6 +767,8 @@ class TSVConverterApp:
             selected_columns=config.selected_columns,
             deduplicate_rows=config.deduplicate_rows,
             ram_threshold=config.ram_threshold,
+            advanced_filters=getattr(config, "advanced_filters", None)
+            or self._get_combined_advanced_filters(),
         )
 
         # Подключаем сигналы
@@ -725,6 +792,13 @@ class TSVConverterApp:
         self._timer.start(1000)
 
         self._log_message("Конвертация запущена...", QColor("blue"))
+        combined_adv = self._get_combined_advanced_filters()
+        if combined_adv:
+            summary = "; ".join(
+                f"{column}: {len(values)} зн."
+                for column, values in sorted(combined_adv.items())
+            )
+            self._log_message(f"Multi-ограничения (И): {summary}", QColor("blue"))
 
     def _stop_conversion(self):
         """Останавливает конвертацию."""
