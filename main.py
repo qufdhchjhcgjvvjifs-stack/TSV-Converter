@@ -187,6 +187,8 @@ class TSVConverterApp:
             sheet_split_values,
             selected_columns,
             advanced_filters,
+            self._get_file_split_targets(),
+            self._get_sheet_split_targets(),
         )
         worker.finished.connect(
             lambda total: self.window.total_rows_label.setText(f"Строк: {total:,}")
@@ -215,12 +217,16 @@ class TSVConverterApp:
         sheet_split_values=None,
         selected_columns=None,
         advanced_filters=None,
+        file_targets=None,
+        sheet_targets=None,
     ):
         """Фоновая задача подсчета строк."""
         file_split_values = file_split_values or {}
         sheet_split_values = sheet_split_values or {}
         selected_columns = selected_columns or []
         advanced_filters = advanced_filters or {}
+        file_targets = file_targets or {}
+        sheet_targets = sheet_targets or {}
         total = 0
         for file_path in files:
             try:
@@ -269,6 +275,21 @@ class TSVConverterApp:
                                 adv_indices.append((headers.index(column), set(values)))
                             except ValueError:
                                 continue
+
+                    # Multi-раскладка не отсекает строки (всё уходит в цели или rest),
+                    # поэтому одиночное разделение при активных целях игнорируется.
+                    has_file_targets = any(
+                        column in headers and values
+                        for column, values in file_targets.items()
+                    )
+                    has_sheet_targets = any(
+                        column in headers and values
+                        for column, values in sheet_targets.items()
+                    )
+                    if has_file_targets:
+                        file_split_idx = None
+                    if has_sheet_targets:
+                        sheet_split_idx = None
 
                     if selected_columns and len(selected_columns) < len(headers):
                         header_to_index = {}
@@ -341,26 +362,81 @@ class TSVConverterApp:
         self._update_total_rows()
         self._update_pivot_settings_filter()
 
-    def _get_combined_advanced_filters(self) -> dict:
-        """Возвращает объединённые multi-ограничения из GUI (И-логика)."""
+    def _warn_if_combined_split(self, dimension: str):
+        """Предупреждает в журнале, что итогом будут файлы x листы."""
+        other = "files" if dimension == "sheets" else "sheets"
+        other_titles = {"files": "на файлы", "sheets": "на листы"}
         try:
-            return dict(self.window.get_combined_advanced_filters())
+            if other == "files":
+                other_active = bool(self._get_file_split_targets()) or (
+                    self.window.file_split_column_combo.currentIndex() > 0
+                )
+            else:
+                other_active = bool(self._get_sheet_split_targets()) or (
+                    self.window.split_column_combo.currentIndex() > 0
+                )
+        except Exception:
+            return
+        if other_active:
+            self._log_message(
+                f"Внимание: активно разделение {other_titles[other]} И {other_titles[dimension]} — "
+                "итогом будут файлы x листы. Для чистых листов/файлов сбросьте другое измерение "
+                "(комбо в начало, ... -> Очистить).",
+                QColor("orange"),
+            )
+
+    def _get_combined_advanced_filters(self) -> dict:
+        """Возвращает только multi-ограничения фильтра (цели сплита не фильтруют)."""
+        try:
+            return dict(self.window.get_filter_advanced())
+        except Exception:
+            return {}
+
+    def _get_file_split_targets(self) -> dict:
+        """Возвращает цели раскладки по файлам."""
+        try:
+            return dict(self.window.get_file_split_targets())
+        except Exception:
+            return {}
+
+    def _get_sheet_split_targets(self) -> dict:
+        """Возвращает цели раскладки по листам."""
+        try:
+            return dict(self.window.get_sheet_split_targets())
         except Exception:
             return {}
 
     def _on_advanced_filters_changed(self, dimension: str):
-        """Обработчик загрузки/очистки multi-ограничений через кнопку ...."""
+        """Обработчик загрузки/очистки Excel-файлов через кнопки ...."""
         titles = {"filter": "Фильтр", "files": "Разделение на файлы", "sheets": "Разделение на листы"}
-        combined = self._get_combined_advanced_filters()
-        if combined:
-            summary = "; ".join(
-                f"{column}: {len(values)} зн."
-                for column, values in sorted(combined.items())
+        if dimension == "filter":
+            combined = self._get_combined_advanced_filters()
+            if combined:
+                summary = "; ".join(
+                    f"{column}: {len(values)} зн."
+                    for column, values in sorted(combined.items())
+                )
+                self._log_message(
+                    f"Активные multi-ограничения [{titles.get(dimension, dimension)}]: {summary}",
+                    QColor("blue"),
+                )
+        else:
+            targets = (
+                self._get_file_split_targets()
+                if dimension == "files"
+                else self._get_sheet_split_targets()
             )
-            self._log_message(
-                f"Активные multi-ограничения [{titles.get(dimension, dimension)}]: {summary}",
-                QColor("blue"),
-            )
+            if targets:
+                total_targets = sum(len(values) for values in targets.values())
+                summary = "; ".join(
+                    f"{column}: {len(values)} зн."
+                    for column, values in sorted(targets.items())
+                )
+                self._log_message(
+                    f"Активная multi-раскладка [{titles.get(dimension, dimension)}]: "
+                    f"{summary} (целей: {total_targets} + Все остальное)",
+                    QColor("blue"),
+                )
         self._update_total_rows()
         self._update_pivot_settings_filter()
 
@@ -375,6 +451,8 @@ class TSVConverterApp:
         filter_values_dict,
         selected_columns=None,
         advanced_filters=None,
+        file_targets=None,
+        sheet_targets=None,
     ):
         """Фоновая задача подсчета распределения строк по значениям разделения."""
         counts = defaultdict(lambda: defaultdict(int))
@@ -382,8 +460,11 @@ class TSVConverterApp:
         sheet_selected_set = set(sheet_split_values)
         selected_columns = selected_columns or []
         advanced_filters = advanced_filters or {}
+        file_targets = file_targets or {}
+        sheet_targets = sheet_targets or {}
         seen_rows_by_destination = defaultdict(set)
         total_rows = 0
+        REST_LABEL = "Все остальное"
         
         filter_vals = None
         if filter_col and filter_col != "Не фильтровать":
@@ -396,6 +477,28 @@ class TSVConverterApp:
             if selected_set and val not in selected_set:
                 return "Остальные"
             return val
+
+        def resolve_targets(headers, targets):
+            header_to_index = {}
+            for index, header in enumerate(headers):
+                if header not in header_to_index:
+                    header_to_index[header] = index
+            resolved = []
+            for column in sorted(targets):
+                if column not in header_to_index or not targets[column]:
+                    continue
+                for value in sorted(set(targets[column])):
+                    resolved.append(
+                        (header_to_index[column], column, value)
+                    )
+            return resolved
+
+        def match_labels(row, resolved):
+            matched = []
+            for idx, column, value in resolved:
+                if idx < len(row) and row[idx] == value:
+                    matched.append(f"{column}={value}")
+            return matched if matched else [REST_LABEL]
 
         for file_path in files:
             try:
@@ -445,6 +548,13 @@ class TSVConverterApp:
                                     adv_indices.append((headers.index(column), set(values)))
                                 except ValueError:
                                     continue
+
+                        file_resolved = resolve_targets(headers, file_targets)
+                        sheet_resolved = resolve_targets(headers, sheet_targets)
+                        if file_resolved and file_split_idx is not None:
+                            file_split_idx = None
+                        if sheet_resolved and sheet_split_idx is not None:
+                            sheet_split_idx = None
                         
                         for row in reader:
                             if adv_indices:
@@ -460,34 +570,47 @@ class TSVConverterApp:
                                 if filter_idx >= len(row) or row[filter_idx] not in filter_vals:
                                     continue
 
-                            file_key = ""
-                            if file_split_idx is not None:
+                            if file_resolved:
+                                file_keys = match_labels(row, file_resolved)
+                            elif file_split_idx is not None:
                                 file_key = get_split_value(
                                     row, file_split_idx, file_selected_set
                                 )
                                 if not file_key:
                                     continue
+                                file_keys = [file_key]
+                            else:
+                                file_keys = [""]
 
-                            sheet_key = ""
-                            if sheet_split_idx is not None:
+                            if sheet_resolved:
+                                sheet_keys = match_labels(row, sheet_resolved)
+                            elif sheet_split_idx is not None:
                                 sheet_key = get_split_value(
                                     row, sheet_split_idx, sheet_selected_set
                                 )
                                 if not sheet_key:
                                     continue
+                                sheet_keys = [sheet_key]
+                            else:
+                                sheet_keys = [""]
 
-                            if output_indices:
-                                row_key = TSVConverterApp._dedup_key(
-                                    row[idx] if idx < len(row) else ""
-                                    for idx in output_indices
-                                )
-                                destination_key = (file_key, sheet_key)
-                                if row_key in seen_rows_by_destination[destination_key]:
-                                    continue
-                                seen_rows_by_destination[destination_key].add(row_key)
+                            row_written = False
+                            for file_key in file_keys:
+                                for sheet_key in sheet_keys:
+                                    if output_indices:
+                                        row_key = TSVConverterApp._dedup_key(
+                                            row[idx] if idx < len(row) else ""
+                                            for idx in output_indices
+                                        )
+                                        destination_key = (file_key, sheet_key)
+                                        if row_key in seen_rows_by_destination[destination_key]:
+                                            continue
+                                        seen_rows_by_destination[destination_key].add(row_key)
 
-                            counts[file_key][sheet_key] += 1
-                            total_rows += 1
+                                    counts[file_key][sheet_key] += 1
+                                    row_written = True
+                            if row_written:
+                                total_rows += 1
                                 
                     except (ValueError, StopIteration):
                         continue
@@ -498,6 +621,8 @@ class TSVConverterApp:
             "sheet_column": sheet_split_col,
             "counts": {key: dict(value) for key, value in counts.items()},
             "total_rows": total_rows,
+            "multi_file": bool(file_targets),
+            "multi_sheet": bool(sheet_targets),
         }
 
     def _on_split_distribution_calculated(self, result):
@@ -508,17 +633,27 @@ class TSVConverterApp:
         total_rows = result.get("total_rows", 0) if isinstance(result, dict) else 0
         file_column = result.get("file_column", "") if isinstance(result, dict) else ""
         sheet_column = result.get("sheet_column", "") if isinstance(result, dict) else ""
-        has_file_split = bool(file_column and file_column != "Не разделять на файлы")
-        has_sheet_split = bool(sheet_column and sheet_column != "Не разделять на листы")
+        multi_file = result.get("multi_file", False) if isinstance(result, dict) else False
+        multi_sheet = result.get("multi_sheet", False) if isinstance(result, dict) else False
+        has_file_split = bool(
+            multi_file or (file_column and file_column != "Не разделять на файлы")
+        )
+        has_sheet_split = bool(
+            multi_sheet or (sheet_column and sheet_column != "Не разделять на листы")
+        )
 
         if not counts:
             self._log_message("Анализ разделения: нет данных для распределения", QColor("orange"))
             return
 
         self._log_message("=== Прогноз разделения ===", QColor("cyan"))
-        if has_file_split:
+        if multi_file:
+            self._log_message("Файлы: multi-раскладка из Excel + Все остальное", QColor("blue"))
+        elif has_file_split:
             self._log_message(f"Файлы по столбцу: {file_column}", QColor("blue"))
-        if has_sheet_split:
+        if multi_sheet:
+            self._log_message("Листы: multi-раскладка из Excel + Все остальное", QColor("blue"))
+        elif has_sheet_split:
             self._log_message(f"Листы по столбцу: {sheet_column}", QColor("blue"))
 
         if has_file_split and has_sheet_split:
@@ -627,6 +762,7 @@ class TSVConverterApp:
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 selected = dialog.get_selected_values()
                 storage[column] = selected
+                self._warn_if_combined_split(dimension)
                 self._update_total_rows()
                 
                 # Показываем лоадер на главном окне
@@ -657,6 +793,8 @@ class TSVConverterApp:
                     self.window._filter_values,
                     list(self.window._selected_output_columns),
                     self._get_combined_advanced_filters(),
+                    self._get_file_split_targets(),
+                    self._get_sheet_split_targets(),
                 )
                 
                 worker.finished.connect(self._on_split_distribution_calculated)
@@ -769,6 +907,10 @@ class TSVConverterApp:
             ram_threshold=config.ram_threshold,
             advanced_filters=getattr(config, "advanced_filters", None)
             or self._get_combined_advanced_filters(),
+            file_split_targets=getattr(config, "file_split_targets", None)
+            or self._get_file_split_targets(),
+            sheet_split_targets=getattr(config, "sheet_split_targets", None)
+            or self._get_sheet_split_targets(),
         )
 
         # Подключаем сигналы
@@ -799,6 +941,38 @@ class TSVConverterApp:
                 for column, values in sorted(combined_adv.items())
             )
             self._log_message(f"Multi-ограничения (И): {summary}", QColor("blue"))
+        file_targets = self._get_file_split_targets()
+        if file_targets:
+            total_targets = sum(len(values) for values in file_targets.values())
+            self._log_message(
+                f"Multi-разделение на файлы: {total_targets} целей + Все остальное",
+                QColor("blue"),
+            )
+        sheet_targets = self._get_sheet_split_targets()
+        if sheet_targets:
+            total_targets = sum(len(values) for values in sheet_targets.values())
+            self._log_message(
+                f"Multi-разделение на листы: {total_targets} целей + Все остальное",
+                QColor("blue"),
+            )
+        file_active = bool(file_targets) or (
+            config.file_split_column
+            and config.file_split_column != "Не разделять на файлы"
+        )
+        sheet_active = bool(sheet_targets) or (
+            config.split_column
+            and config.split_column not in ("", "Не разделять", "Не разделять на листы")
+        )
+        if file_active and sheet_active:
+            self._log_message(
+                "Режим: файлы x листы (оба измерения активны)",
+                QColor("orange"),
+            )
+        elif sheet_active:
+            self._log_message(
+                "Режим: листы внутри одного файла",
+                QColor("blue"),
+            )
 
     def _stop_conversion(self):
         """Останавливает конвертацию."""

@@ -46,6 +46,8 @@ class ConversionConfig:
     deduplicate_rows: bool = True
     ram_threshold: int = 500000
     advanced_filters: Dict[str, List[str]] = field(default_factory=dict)
+    file_split_targets: Dict[str, List[str]] = field(default_factory=dict)
+    sheet_split_targets: Dict[str, List[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -537,6 +539,8 @@ class TSVToExcelConverter(QThread):
         deduplicate_rows: bool = True,
         ram_threshold: int = 500000,
         advanced_filters: Optional[Dict[str, List[str]]] = None,
+        file_split_targets: Optional[Dict[str, List[str]]] = None,
+        sheet_split_targets: Optional[Dict[str, List[str]]] = None,
     ):
         super().__init__()
 
@@ -562,6 +566,17 @@ class TSVToExcelConverter(QThread):
         self.advanced_filters: Dict[str, Set[str]] = {
             column: set(values)
             for column, values in (advanced_filters or {}).items()
+            if values
+        }
+        # Цели multi-разделения {столбец: [значения]}: union + "Все остальное".
+        self.file_split_targets: Dict[str, List[str]] = {
+            column: sorted(set(values))
+            for column, values in (file_split_targets or {}).items()
+            if values
+        }
+        self.sheet_split_targets: Dict[str, List[str]] = {
+            column: sorted(set(values))
+            for column, values in (sheet_split_targets or {}).items()
             if values
         }
 
@@ -694,6 +709,48 @@ class TSVToExcelConverter(QThread):
             if idx >= len(row) or row[idx] not in allowed:
                 return False
         return True
+
+    REST_BUCKET_NAME = "Все остальное"
+
+    @staticmethod
+    def _resolve_split_targets(
+        headers: List[str], targets: Dict[str, List[str]]
+    ) -> List[tuple[int, str, str]]:
+        """Строит упорядоченный список целей (индекс, столбец, значение)."""
+        header_to_index: Dict[str, int] = {}
+        for index, header in enumerate(headers):
+            if header not in header_to_index:
+                header_to_index[header] = index
+        resolved: List[tuple[int, str, str]] = []
+        for column in sorted(targets):
+            if column not in header_to_index:
+                continue
+            for value in sorted(set(targets[column])):
+                resolved.append((header_to_index[column], column, value))
+        return resolved
+
+    @staticmethod
+    def _match_target_indices(
+        row: List[str], resolved: List[tuple[int, str, str]]
+    ) -> List[int]:
+        """Возвращает индексы совпавших целей (union); пусто = корзина rest."""
+        matched: List[int] = []
+        for pos, (idx, _column, value) in enumerate(resolved):
+            if idx < len(row) and row[idx] == value:
+                matched.append(pos)
+        return matched
+
+    @staticmethod
+    def _target_display(column: str, value: str) -> str:
+        """Человекочитаемое имя цели для логов."""
+        return f"{column}={value}"
+
+    @staticmethod
+    def _target_stem(
+        column: str, value: str, unique_value: bool
+    ) -> str:
+        """Основа имени файла/листа: значение, либо столбец_значение при коллизии."""
+        return value if unique_value else f"{column}_{value}"
 
     def _get_output_columns(self, headers: List[str]) -> tuple[List[str], List[int]]:
         """Возвращает заголовки и индексы столбцов для итогового файла."""
@@ -896,12 +953,23 @@ class TSVToExcelConverter(QThread):
                     seen_rows = set()
                     seen_rows_by_destination = defaultdict(set)
                     adv_indices = self._resolve_advanced_indices(headers)
+                    file_targets = self._resolve_split_targets(
+                        headers, self.file_split_targets
+                    )
+                    sheet_targets = self._resolve_split_targets(
+                        headers, self.sheet_split_targets
+                    )
 
                     def should_count_row(row: List[str]) -> bool:
                         if adv_indices and not self._passes_advanced(row, adv_indices):
                             return False
                         file_split_value = None
-                        if file_split_idx is not None:
+                        if file_targets:
+                            matched = self._match_target_indices(row, file_targets)
+                            file_split_value = (
+                                f"targets:{len(matched)}" if matched else "targets:rest"
+                            )
+                        elif file_split_idx is not None:
                             file_split_value = self._get_split_value(
                                 row, file_split_idx, file_split_selected_values
                             )
@@ -909,7 +977,12 @@ class TSVToExcelConverter(QThread):
                                 return False
 
                         sheet_split_value = None
-                        if sheet_split_idx is not None:
+                        if sheet_targets:
+                            matched = self._match_target_indices(row, sheet_targets)
+                            sheet_split_value = (
+                                f"targets:{len(matched)}" if matched else "targets:rest"
+                            )
+                        elif sheet_split_idx is not None:
                             sheet_split_value = self._get_split_value(
                                 row, sheet_split_idx, self.selected_values
                             )
@@ -1069,8 +1142,22 @@ class TSVToExcelConverter(QThread):
                 except ValueError:
                     filter_idx = None
 
+            # Multi-разделение через кнопки ... имеет приоритет над одиночным.
+            file_targets = self._resolve_split_targets(headers, self.file_split_targets)
+            sheet_targets = self._resolve_split_targets(
+                headers, self.sheet_split_targets
+            )
+            if file_targets or sheet_targets:
+                if file_targets and split_idx is not None:
+                    self.log_message.emit(
+                        "CSV: multi-разделение на файлы переопределяет одиночное разделение.",
+                        QColor("orange"),
+                    )
+                self._write_multi_target_csv(
+                    reader, headers, base_name, file_targets, sheet_targets, filter_idx
+                )
             # Если есть разделение, пишем в разные файлы
-            if split_idx is not None:
+            elif split_idx is not None:
                 self._write_split_csv(
                     reader, headers, base_name, split_idx, filter_idx, split_values
                 )
@@ -1225,6 +1312,105 @@ class TSVToExcelConverter(QThread):
             if path not in files_to_remove:
                 self.generated_files.append(path)
 
+    def _write_multi_target_csv(
+        self,
+        reader,
+        headers: List[str],
+        base_name: str,
+        file_targets: List[tuple[int, str, str]],
+        sheet_targets: List[tuple[int, str, str]],
+        filter_idx,
+    ):
+        """CSV-раскладка по целям multi-разделения: каждая цель → свой файл + rest."""
+        combined = list(file_targets) + list(sheet_targets)
+        value_counts: Dict[str, int] = defaultdict(int)
+        for _idx, _column, value in combined:
+            value_counts[value] += 1
+        stems: List[str] = [
+            self._target_stem(column, value, value_counts[value] == 1)
+            for _idx, column, value in combined
+        ]
+
+        MAX_OPEN_FILES = 200
+        open_files: Dict[int, Any] = {}
+        writers: Dict[int, Any] = {}
+        used_file_names: Set[str] = set()
+        file_paths: Dict[int, str] = {}
+        row_counts: Dict[int, int] = defaultdict(int)
+        current_file = f"{base_name}_*.csv"
+        output_headers, output_indices = self._get_output_columns(headers)
+        deduplicate_rows = self._should_deduplicate_rows(headers, output_indices)
+        seen_rows_by_key: Dict[Any, Set[bytes]] = defaultdict(set)
+        adv_indices = self._resolve_advanced_indices(headers)
+        hierarchy_counts: Dict[str, int] = defaultdict(int)
+
+        def _create_csv_file(key: int):
+            stem = self.REST_BUCKET_NAME if key == -1 else stems[key]
+            safe_key = FileUtilities.sanitize_file_stem(stem, used_file_names)
+            file_path = os.path.join(
+                self.output_directory, f"{base_name}_{safe_key}.csv"
+            )
+            file_paths[key] = file_path
+            handle = open(file_path, "w", encoding="utf-8-sig", newline="")
+            writer = csv.writer(handle, delimiter=";")
+            writer.writerow(output_headers)
+            open_files[key] = handle
+            writers[key] = writer
+
+        def process_row(row):
+            matched = self._match_target_indices(row, combined)
+            dests = matched if matched else [-1]
+            output_row = self._project_row(row, output_indices)
+            written = False
+            for key in dests:
+                if deduplicate_rows:
+                    row_key = self._dedup_key(output_row)
+                    if row_key in seen_rows_by_key[key]:
+                        self.duplicates_removed += 1
+                        continue
+                    seen_rows_by_key[key].add(row_key)
+                if key not in writers:
+                    if len(open_files) >= MAX_OPEN_FILES:
+                        oldest_key = next(iter(open_files))
+                        open_files[oldest_key].close()
+                        del open_files[oldest_key]
+                        del writers[oldest_key]
+                    _create_csv_file(key)
+                writers[key].writerow(output_row)
+                row_counts[key] += 1
+                label = (
+                    self.REST_BUCKET_NAME
+                    if key == -1
+                    else self._target_display(combined[key][1], combined[key][2])
+                )
+                hierarchy_counts[label] += 1
+                written = True
+            return written
+
+        try:
+            self._process_rows_with_progress(
+                reader,
+                filter_idx,
+                current_file,
+                process_row,
+                "Распределение по CSV...",
+                adv_indices,
+            )
+        finally:
+            for handle in open_files.values():
+                handle.close()
+
+        if hierarchy_counts:
+            self.log_message.emit("Распределение по файлам:", QColor("blue"))
+            for pos, (label, count) in enumerate(
+                sorted(hierarchy_counts.items(), key=lambda item: item[1], reverse=True),
+                start=1,
+            ):
+                self.log_message.emit(f"{pos}. Файл: {label}: {count:,} строк", QColor("gray"))
+
+        self.output_file_path = self.output_directory
+        self.generated_files.extend(file_paths.values())
+
     def _create_csv_pivot(self, input_file, base_name):
         try:
             processor = PivotTableProcessor(lambda _msg, _color: None)
@@ -1348,6 +1534,26 @@ class TSVToExcelConverter(QThread):
                 if expected_split_to_files and file_split_idx is None:
                     actual_split_to_files = False
 
+                # Multi-разделение через кнопки ... (union + "Все остальное").
+                file_targets = self._resolve_split_targets(
+                    headers, self.file_split_targets
+                )
+                sheet_targets = self._resolve_split_targets(
+                    headers, self.sheet_split_targets
+                )
+                if file_targets and file_split_idx is not None:
+                    self.log_message.emit(
+                        "Multi-разделение на файлы переопределяет одиночное разделение.",
+                        QColor("orange"),
+                    )
+                if sheet_targets and split_idx is not None:
+                    self.log_message.emit(
+                        "Multi-разделение на листы переопределяет одиночное разделение.",
+                        QColor("orange"),
+                    )
+                if file_targets or sheet_targets:
+                    actual_split_to_files = True
+
                 # Создаём главный workbook, если мы НЕ разделяем на файлы (или если разделение отменилось)
                 if not actual_split_to_files:
                     t_create_wb = time.time()
@@ -1372,7 +1578,21 @@ class TSVToExcelConverter(QThread):
                     self._timing['create_workbook'] = self._timing.get('create_workbook', 0.0) + (time.time() - t_create_wb)
                     self._init_formats(workbook)
 
-                if file_split_idx is not None:
+                if file_targets or sheet_targets:
+                    self._convert_with_multi_targets(
+                        reader,
+                        headers,
+                        file_targets,
+                        sheet_targets,
+                        file_split_idx if not file_targets else None,
+                        self.file_split_values,
+                        split_idx if not sheet_targets else None,
+                        self.selected_values,
+                        filter_idx,
+                        base_name,
+                        os.path.basename(input_file),
+                    )
+                elif file_split_idx is not None:
                     if split_idx is not None:
                         self.log_message.emit(
                             f"Разделение: файлы по '{self.file_split_column}', листы по '{self.split_column}'",
@@ -2086,6 +2306,265 @@ class TSVToExcelConverter(QThread):
 
         self.output_file_path = self.output_directory
         self.generated_files.extend(output_files)
+
+    def _convert_with_multi_targets(
+        self,
+        reader: csv.reader,
+        headers: List[str],
+        file_targets: List[tuple[int, str, str]],
+        sheet_targets: List[tuple[int, str, str]],
+        single_file_idx,
+        single_file_vals: Set[str],
+        single_sheet_idx,
+        single_sheet_vals: Set[str],
+        filter_idx,
+        base_name: str,
+        current_file: str,
+    ):
+        """Раскладка по целям multi-разделения: каждая цель → файл/лист + rest."""
+        open_workbooks: Dict[Any, xlsxwriter.Workbook] = {}
+        worksheets: Dict[Any, Dict[Any, Any]] = defaultdict(dict)
+        row_counts: Dict[Any, Dict[Any, int]] = defaultdict(dict)
+        used_file_names: Set[str] = set()
+        used_sheet_names: Dict[Any, Set[str]] = defaultdict(set)
+        output_files: List[str] = []
+        hierarchy_counts: Dict[str, Dict[str, int]] = defaultdict(
+            lambda: defaultdict(int)
+        )
+
+        output_headers, output_indices = self._get_output_columns(headers)
+        deduplicate_rows = self._should_deduplicate_rows(headers, output_indices)
+        seen_rows_by_destination = defaultdict(set)
+        use_constant_memory = self.total_rows >= self.ram_threshold
+        adv_indices = self._resolve_advanced_indices(headers)
+
+        if use_constant_memory:
+            self.log_message.emit(
+                f"Режим разделения: экономия памяти (Constant Memory, {self.total_rows:,} строк)",
+                QColor("blue"),
+            )
+        else:
+            self.log_message.emit(
+                f"Режим разделения: быстрый (временные файлы, {self.total_rows:,} строк)",
+                QColor("blue"),
+            )
+
+        self._timing["create_workbook"] = 0.0
+
+        def _file_label(key) -> str:
+            if key == "rest":
+                return self.REST_BUCKET_NAME
+            if isinstance(key, int):
+                _idx, column, value = file_targets[key]
+                return self._target_display(column, value)
+            return str(key)
+
+        def _sheet_label(key) -> str:
+            if key == "rest":
+                return self.REST_BUCKET_NAME
+            if isinstance(key, int):
+                _idx, column, value = sheet_targets[key]
+                return self._target_display(column, value)
+            return str(key)
+
+        def _file_stem(key) -> str:
+            if key == "rest":
+                return self.REST_BUCKET_NAME
+            _idx, column, value = file_targets[key]
+            same_values = sum(1 for _, _, val in file_targets if val == value)
+            return self._target_stem(column, value, same_values == 1)
+
+        def _sheet_stem(key) -> str:
+            if key == "rest":
+                return self.REST_BUCKET_NAME
+            _idx, column, value = sheet_targets[key]
+            same_values = sum(1 for _, _, val in sheet_targets if val == value)
+            return self._target_stem(column, value, same_values == 1)
+
+        def _create_workbook_for_key(file_key):
+            t_create = time.time()
+            if file_key == "only":
+                file_path = os.path.join(self.output_directory, f"{base_name}.xlsx")
+            else:
+                safe_value = FileUtilities.sanitize_file_stem(
+                    _file_stem(file_key) if file_targets else str(file_key),
+                    used_file_names,
+                )
+                file_path = os.path.join(
+                    self.output_directory, f"{base_name}_{safe_value}.xlsx"
+                )
+            if use_constant_memory:
+                workbook = xlsxwriter.Workbook(
+                    file_path, {"constant_memory": True, "use_zip64": True}
+                )
+            else:
+                workbook = xlsxwriter.Workbook(file_path)
+            header_format = workbook.add_format(
+                {
+                    "bold": self.styles.get("bold", False),
+                    "italic": self.styles.get("italic", False),
+                    "font_size": self.styles.get("font_size", 12),
+                    "font_name": self.styles.get("font_name", "Arial"),
+                    "bg_color": self.header_color,
+                    "align": "center",
+                    "valign": "vcenter",
+                }
+            )
+            if self.styles.get("border", 0) == 1:
+                header_format.set_border(1)
+            cell_format = workbook.add_format(
+                {
+                    "font_size": self.styles.get("font_size", 12),
+                    "font_name": self.styles.get("font_name", "Arial"),
+                }
+            )
+            if self.styles.get("border", 0) == 1:
+                cell_format.set_border(1)
+            workbook._tsv_header_format = header_format
+            workbook._tsv_cell_format = cell_format
+            open_workbooks[file_key] = workbook
+            output_files.append(file_path)
+            self._timing["create_workbook"] += time.time() - t_create
+
+        def _file_dests(row) -> List[Any]:
+            if file_targets:
+                matched = self._match_target_indices(row, file_targets)
+                return matched if matched else ["rest"]
+            if single_file_idx is not None:
+                value = self._get_split_value(row, single_file_idx, single_file_vals)
+                return [value] if value else []
+            return ["only"]
+
+        def _sheet_dests(row) -> List[Any]:
+            if sheet_targets:
+                matched = self._match_target_indices(row, sheet_targets)
+                return matched if matched else ["rest"]
+            if single_sheet_idx is not None:
+                value = self._get_split_value(row, single_sheet_idx, single_sheet_vals)
+                return [value] if value else []
+            return ["only"]
+
+        def _sheet_base(file_key, sheet_key) -> str:
+            if sheet_targets:
+                return _sheet_stem(sheet_key)
+            if single_sheet_idx is not None:
+                return str(sheet_key)
+            if file_targets:
+                return _file_stem(file_key)
+            return str(file_key)
+
+        def _get_or_create_sheet(file_key, sheet_key):
+            if file_key not in open_workbooks:
+                _create_workbook_for_key(file_key)
+            if sheet_key not in worksheets[file_key]:
+                workbook = open_workbooks[file_key]
+                sheet_name = FileUtilities.sanitize_sheet_name(
+                    _sheet_base(file_key, sheet_key),
+                    used_sheet_names[file_key],
+                )
+                worksheet = workbook.add_worksheet(sheet_name)
+                for col, header in enumerate(output_headers):
+                    worksheet.write(0, col, header, workbook._tsv_header_format)
+                worksheets[file_key][sheet_key] = worksheet
+                row_counts[file_key][sheet_key] = 1
+            return worksheets[file_key][sheet_key]
+
+        def process_row(row):
+            file_dests = _file_dests(row)
+            if not file_dests:
+                return False
+            sheet_dests = _sheet_dests(row)
+            if not sheet_dests:
+                return False
+            output_row = self._project_row(row, output_indices)
+            written = False
+            for file_key in file_dests:
+                for sheet_key in sheet_dests:
+                    if deduplicate_rows:
+                        row_key = self._dedup_key(output_row)
+                        destination_key = (str(file_key), str(sheet_key))
+                        if row_key in seen_rows_by_destination[destination_key]:
+                            self.duplicates_removed += 1
+                            continue
+                        seen_rows_by_destination[destination_key].add(row_key)
+                    worksheet = _get_or_create_sheet(file_key, sheet_key)
+                    current_row = row_counts[file_key][sheet_key]
+                    if current_row >= self.MAX_EXCEL_ROWS:
+                        workbook = open_workbooks[file_key]
+                        sheet_name = FileUtilities.sanitize_sheet_name(
+                            f"{_sheet_base(file_key, sheet_key)}_2",
+                            used_sheet_names[file_key],
+                        )
+                        worksheet = workbook.add_worksheet(sheet_name)
+                        for col, header in enumerate(output_headers):
+                            worksheet.write(
+                                0, col, header, workbook._tsv_header_format
+                            )
+                        worksheets[file_key][sheet_key] = worksheet
+                        row_counts[file_key][sheet_key] = 1
+                        current_row = 1
+                    workbook = open_workbooks[file_key]
+                    worksheet.write_row(
+                        current_row, 0, output_row, workbook._tsv_cell_format
+                    )
+                    row_counts[file_key][sheet_key] = current_row + 1
+                    hierarchy_counts[_file_label(file_key)][_sheet_label(sheet_key)] += 1
+                    written = True
+            return written
+
+        self._process_rows_with_progress(
+            reader,
+            filter_idx,
+            current_file,
+            process_row,
+            "Распределение по файлам и листам...",
+            adv_indices,
+        )
+
+        if hierarchy_counts:
+            self.log_message.emit("Итоговое распределение по файлам и листам:", QColor("blue"))
+            sorted_files = sorted(
+                hierarchy_counts.items(),
+                key=lambda item: sum(item[1].values()),
+                reverse=True,
+            )
+            for file_index, (file_value, sheet_counts) in enumerate(sorted_files, start=1):
+                file_total = sum(sheet_counts.values())
+                self.log_message.emit(
+                    f"{file_index}. Файл: {file_value}: {file_total:,} строк",
+                    QColor("gray"),
+                )
+                sorted_sheets = sorted(
+                    sheet_counts.items(), key=lambda item: item[1], reverse=True
+                )
+                for sheet_index, (sheet_value, count) in enumerate(sorted_sheets, start=1):
+                    self.log_message.emit(
+                        f"   {sheet_index}. Лист: {sheet_value}: {count:,} строк",
+                        QColor("gray"),
+                    )
+
+        self._emit_progress_update(current_file, "Сохранение файлов...", force=True)
+        t_close_start = time.time()
+        for workbook in open_workbooks.values():
+            try:
+                workbook.close()
+            except Exception:
+                pass
+        t_close = time.time() - t_close_start
+        self._timing["close_workbook"] = t_close
+        self._timing["close_workbook_total"] = self._timing.get("close_workbook_total", 0) + t_close
+
+        if len(open_workbooks) > 100:
+            self.log_message.emit(
+                f"Создано {len(open_workbooks)} файлов. При большом количестве "
+                f"уникальных значений возможно превышение лимита открытых файлов ОС.",
+                QColor("orange"),
+            )
+
+        self.output_file_path = self.output_directory
+        self.generated_files.extend(output_files)
+        if not file_targets and single_file_idx is None and len(output_files) == 1:
+            self.output_file_path = output_files[0]
 
     def _convert_without_split(
         self,
