@@ -69,6 +69,8 @@ from typing import Optional, Dict, List, Set, Any
 # Импортируем утилиты из converter.py
 from converter import FileUtilities, ConversionConfig
 
+APP_VERSION = "20.3"
+
 
 # ============================================================================
 # УТИЛИТЫ И БАЗОВЫЕ КЛАССЫ
@@ -895,6 +897,15 @@ class SettingsDialog(QDialog):
         self._init_ui()
         # Применяем тему после создания UI
         apply_theme_to_dialog(self, self._is_dark)
+        # Версия: серый текст без фона (темизатор выше перезаписал палитры,
+        # поэтому настраиваем после него; QSS не используем).
+        if hasattr(self, "_version_label"):
+            version_palette = self._version_label.palette()
+            version_palette.setColor(
+                QPalette.ColorRole.WindowText, QColor(128, 128, 128)
+            )
+            self._version_label.setPalette(version_palette)
+            self._version_label.setAutoFillBackground(False)
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -914,6 +925,14 @@ class SettingsDialog(QDialog):
 
         # Кнопки
         button_layout = QHBoxLayout()
+
+        version_label = QLabel(f"Версия: {APP_VERSION}")
+        version_font = version_label.font()
+        version_font.setPointSize(8)
+        version_label.setFont(version_font)
+        self._version_label = version_label
+        button_layout.addWidget(version_label)
+
         button_layout.addStretch()
 
         save_btn = PrimaryButton("Сохранить")
