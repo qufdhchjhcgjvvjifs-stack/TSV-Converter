@@ -278,9 +278,7 @@ class FileUtilities:
                 ):
                     continue
                 if not raw_a:
-                    raise ValueError(
-                        f"Строка {row_idx}: пустое название столбца (A)"
-                    )
+                    raise ValueError(f"Строка {row_idx}: пустое название столбца (A)")
                 if not raw_b:
                     continue
                 result[raw_a].add(raw_b)
@@ -614,7 +612,7 @@ class TSVToExcelConverter(QThread):
             # Подсчёт общего количества строк
             t0 = time.time()
             self._count_total_rows()
-            self._timing['count_rows'] = time.time() - t0
+            self._timing["count_rows"] = time.time() - t0
 
             if self.stop_flag:
                 self._finish_as_stopped()
@@ -639,7 +637,7 @@ class TSVToExcelConverter(QThread):
                 t_file_start = time.time()
                 conversion_result = self._convert_file(tsv_file, processed)
                 t_file_elapsed = time.time() - t_file_start
-                self._timing[f'convert_file_{processed}'] = t_file_elapsed
+                self._timing[f"convert_file_{processed}"] = t_file_elapsed
 
                 if conversion_result == "success":
                     processed += 1
@@ -746,9 +744,7 @@ class TSVToExcelConverter(QThread):
         return f"{column}={value}"
 
     @staticmethod
-    def _target_stem(
-        column: str, value: str, unique_value: bool
-    ) -> str:
+    def _target_stem(column: str, value: str, unique_value: bool) -> str:
         """Основа имени файла/листа: значение, либо столбец_значение при коллизии."""
         return value if unique_value else f"{column}_{value}"
 
@@ -783,7 +779,9 @@ class TSVToExcelConverter(QThread):
             )
             return headers, list(range(len(headers)))
 
-        if len(output_indices) != len(headers) or output_indices != list(range(len(headers))):
+        if len(output_indices) != len(headers) or output_indices != list(
+            range(len(headers))
+        ):
             self.log_message.emit(
                 f"Столбцы вывода: {len(output_indices)} из {len(headers)}",
                 QColor("blue"),
@@ -847,22 +845,26 @@ class TSVToExcelConverter(QThread):
         self.log_message.emit("=== Профилирование ===", QColor("cyan"))
 
         # Основные этапы
-        if 'count_rows' in self._timing:
-            self.log_message.emit(f"Подсчёт строк: {self._timing['count_rows']:.2f}s", QColor("gray"))
+        if "count_rows" in self._timing:
+            self.log_message.emit(
+                f"Подсчёт строк: {self._timing['count_rows']:.2f}s", QColor("gray")
+            )
 
         # Детали файловых конверсий
         file_times = []
         for k, v in sorted(self._timing.items()):
-            if k.startswith('convert_file_'):
-                file_idx = int(k.split('_')[-1]) if '_' in k else 0
+            if k.startswith("convert_file_"):
+                file_idx = int(k.split("_")[-1]) if "_" in k else 0
                 file_times.append((file_idx, k, v))
 
         for file_idx, k, v in sorted(file_times):
             pct = (v / total_time * 100) if total_time > 0 else 0
-            self.log_message.emit(f"  Файл #{file_idx + 1}: {v:.2f}s ({pct:.1f}%)", QColor("gray"))
+            self.log_message.emit(
+                f"  Файл #{file_idx + 1}: {v:.2f}s ({pct:.1f}%)", QColor("gray")
+            )
 
         # Детальные метрики по всем файлам
-        detail_keys = ['create_workbook', 'close_workbook', 'Запись данных...']
+        detail_keys = ["create_workbook", "close_workbook", "Запись данных..."]
         for k in detail_keys:
             if k in self._timing:
                 v = self._timing[k]
@@ -870,10 +872,12 @@ class TSVToExcelConverter(QThread):
                 self.log_message.emit(f"  {k}: {v:.2f}s ({pct:.1f}%)", QColor("gray"))
 
         # Суммарное время закрытия всех файлов
-        if 'close_workbook_total' in self._timing:
-            v = self._timing['close_workbook_total']
+        if "close_workbook_total" in self._timing:
+            v = self._timing["close_workbook_total"]
             pct = (v / total_time * 100) if total_time > 0 else 0
-            self.log_message.emit(f"  Суммарное закрытие файлов: {v:.2f}s ({pct:.1f}%)", QColor("red"))
+            self.log_message.emit(
+                f"  Суммарное закрытие файлов: {v:.2f}s ({pct:.1f}%)", QColor("red")
+            )
 
         if total_time > 0:
             self.log_message.emit(f"Общее время: {total_time:.2f}s", QColor("blue"))
@@ -915,9 +919,9 @@ class TSVToExcelConverter(QThread):
                             file_split_idx = None
 
                     sheet_split_idx = None
-                    if (
-                        self.split_column
-                        and self.split_column not in ("Не разделять", "Не разделять на листы")
+                    if self.split_column and self.split_column not in (
+                        "Не разделять",
+                        "Не разделять на листы",
                     ):
                         try:
                             sheet_split_idx = headers.index(self.split_column)
@@ -933,7 +937,9 @@ class TSVToExcelConverter(QThread):
                             sheet_split_idx = None
 
                     output_indices = None
-                    if self.selected_columns and len(self.selected_columns) < len(headers):
+                    if self.selected_columns and len(self.selected_columns) < len(
+                        headers
+                    ):
                         header_to_index = {}
                         for index, header in enumerate(headers):
                             if header not in header_to_index:
@@ -994,7 +1000,10 @@ class TSVToExcelConverter(QThread):
                                 row[index] if index < len(row) else ""
                                 for index in output_indices
                             )
-                            if file_split_value is not None or sheet_split_value is not None:
+                            if (
+                                file_split_value is not None
+                                or sheet_split_value is not None
+                            ):
                                 destination_key = (file_split_value, sheet_split_value)
                                 if row_key in seen_rows_by_destination[destination_key]:
                                     return False
@@ -1118,7 +1127,11 @@ class TSVToExcelConverter(QThread):
                 try:
                     split_idx = headers.index(self.file_split_column)
                     split_values = self.file_split_values
-                    if self.split_column not in ("", "Не разделять", "Не разделять на листы"):
+                    if self.split_column not in (
+                        "",
+                        "Не разделять",
+                        "Не разделять на листы",
+                    ):
                         self.log_message.emit(
                             "CSV не поддерживает листы: разделение на листы проигнорировано, используется разделение на CSV-файлы.",
                             QColor("orange"),
@@ -1126,9 +1139,14 @@ class TSVToExcelConverter(QThread):
                 except ValueError:
                     split_idx = None
 
-            if split_idx is None and self.split_column and self.split_column not in (
-                "Не разделять",
-                "Не разделять на листы",
+            if (
+                split_idx is None
+                and self.split_column
+                and self.split_column
+                not in (
+                    "Не разделять",
+                    "Не разделять на листы",
+                )
             ):
                 try:
                     split_idx = headers.index(self.split_column)
@@ -1403,10 +1421,14 @@ class TSVToExcelConverter(QThread):
         if hierarchy_counts:
             self.log_message.emit("Распределение по файлам:", QColor("blue"))
             for pos, (label, count) in enumerate(
-                sorted(hierarchy_counts.items(), key=lambda item: item[1], reverse=True),
+                sorted(
+                    hierarchy_counts.items(), key=lambda item: item[1], reverse=True
+                ),
                 start=1,
             ):
-                self.log_message.emit(f"{pos}. Файл: {label}: {count:,} строк", QColor("gray"))
+                self.log_message.emit(
+                    f"{pos}. Файл: {label}: {count:,} строк", QColor("gray")
+                )
 
         self.output_file_path = self.output_directory
         self.generated_files.extend(file_paths.values())
@@ -1511,17 +1533,17 @@ class TSVToExcelConverter(QThread):
                             QColor("orange"),
                         )
 
-                if (
-                    self.split_column
-                    and self.split_column not in ("Не разделять", "Не разделять на листы")
+                if self.split_column and self.split_column not in (
+                    "Не разделять",
+                    "Не разделять на листы",
                 ):
                     try:
                         split_idx = headers.index(self.split_column)
                     except ValueError:
                         split_idx = None
                         self.log_message.emit(
-                            f"Столбец для разделения на листы '{self.split_column}' не найден в файле. Разделение на листы отменено.", 
-                            QColor("orange")
+                            f"Столбец для разделения на листы '{self.split_column}' не найден в файле. Разделение на листы отменено.",
+                            QColor("orange"),
                         )
 
                 if self.filter_column and self.filter_column != "Не фильтровать":
@@ -1575,19 +1597,18 @@ class TSVToExcelConverter(QThread):
                             f"Режим: быстрый (временные файлы, {self.total_rows:,} строк)",
                             QColor("blue"),
                         )
-                    self._timing['create_workbook'] = self._timing.get('create_workbook', 0.0) + (time.time() - t_create_wb)
+                    self._timing["create_workbook"] = self._timing.get(
+                        "create_workbook", 0.0
+                    ) + (time.time() - t_create_wb)
                     self._init_formats(workbook)
 
                 if file_targets or sheet_targets:
+                    # При активных целях одиночные сплиты полностью игнорируются.
                     self._convert_with_multi_targets(
                         reader,
                         headers,
                         file_targets,
                         sheet_targets,
-                        file_split_idx if not file_targets else None,
-                        self.file_split_values,
-                        split_idx if not sheet_targets else None,
-                        self.selected_values,
                         filter_idx,
                         base_name,
                         os.path.basename(input_file),
@@ -1668,7 +1689,8 @@ class TSVToExcelConverter(QThread):
                             if actual_split_to_files:
                                 # При разделении на файлы — сводная в отдельный файл
                                 pivot_output_path = os.path.join(
-                                    self.output_directory, f"{base_name}_Сводная таблица.xlsx"
+                                    self.output_directory,
+                                    f"{base_name}_Сводная таблица.xlsx",
                                 )
                                 pivot_workbook = xlsxwriter.Workbook(pivot_output_path)
 
@@ -1760,23 +1782,25 @@ class TSVToExcelConverter(QThread):
                 except Exception:
                     pass
                 cw_time = time.time() - t_close
-                self._timing['close_workbook'] = cw_time
-                self._timing['close_workbook_total'] = self._timing.get('close_workbook_total', 0) + cw_time
+                self._timing["close_workbook"] = cw_time
+                self._timing["close_workbook_total"] = (
+                    self._timing.get("close_workbook_total", 0) + cw_time
+                )
 
             self._cached_formats = {}
 
             # Record overall conversion time
-            self._timing['conversion_total'] = time.time() - t_convert
+            self._timing["conversion_total"] = time.time() - t_convert
 
         if (
-                result != "success"
-                and not actual_split_to_files
-                and os.path.exists(output_path)
-            ):
-                try:
-                    os.remove(output_path)
-                except Exception:
-                    pass
+            result != "success"
+            and not actual_split_to_files
+            and os.path.exists(output_path)
+        ):
+            try:
+                os.remove(output_path)
+            except Exception:
+                pass
 
         if result == "success":
             if not actual_split_to_files:
@@ -1940,7 +1964,12 @@ class TSVToExcelConverter(QThread):
             return True
 
         self._process_rows_with_progress(
-            reader, filter_idx, current_file, process_row, "Запись данных...", adv_indices
+            reader,
+            filter_idx,
+            current_file,
+            process_row,
+            "Запись данных...",
+            adv_indices,
         )
 
     def _convert_with_split_to_files(
@@ -1980,7 +2009,7 @@ class TSVToExcelConverter(QThread):
                 QColor("blue"),
             )
 
-        self._timing['create_workbook'] = 0.0
+        self._timing["create_workbook"] = 0.0
 
         def _create_workbook_for_value(value: str):
             """Создаёт новый workbook для значения."""
@@ -2033,7 +2062,7 @@ class TSVToExcelConverter(QThread):
             workbook._tsv_cell_format = cell_format
 
             output_files.append(file_path)
-            self._timing['create_workbook'] += time.time() - t_create
+            self._timing["create_workbook"] += time.time() - t_create
 
         def process_row(row):
             value = self._get_split_value(row, split_idx, selected_vals)
@@ -2080,8 +2109,10 @@ class TSVToExcelConverter(QThread):
                 pass
 
         t_close = time.time() - t_close_start
-        self._timing['close_workbook'] = t_close
-        self._timing['close_workbook_total'] = self._timing.get('close_workbook_total', 0) + t_close
+        self._timing["close_workbook"] = t_close
+        self._timing["close_workbook_total"] = (
+            self._timing.get("close_workbook_total", 0) + t_close
+        )
 
         # Удаляем файлы без данных (только заголовок)
         # row_count = 1 означает только заголовок, без строк данных
@@ -2132,7 +2163,9 @@ class TSVToExcelConverter(QThread):
         used_file_names: Set[str] = set()
         used_sheet_names: Dict[str, Set[str]] = defaultdict(set)
         output_files: List[str] = []
-        hierarchy_counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        hierarchy_counts: Dict[str, Dict[str, int]] = defaultdict(
+            lambda: defaultdict(int)
+        )
 
         output_headers, output_indices = self._get_output_columns(headers)
         deduplicate_rows = self._should_deduplicate_rows(headers, output_indices)
@@ -2264,13 +2297,17 @@ class TSVToExcelConverter(QThread):
         )
 
         if hierarchy_counts:
-            self.log_message.emit("Итоговое распределение по файлам и листам:", QColor("blue"))
+            self.log_message.emit(
+                "Итоговое распределение по файлам и листам:", QColor("blue")
+            )
             sorted_files = sorted(
                 hierarchy_counts.items(),
                 key=lambda item: sum(item[1].values()),
                 reverse=True,
             )
-            for file_index, (file_value, sheet_counts) in enumerate(sorted_files, start=1):
+            for file_index, (file_value, sheet_counts) in enumerate(
+                sorted_files, start=1
+            ):
                 file_total = sum(sheet_counts.values())
                 self.log_message.emit(
                     f"{file_index}. Файл: {file_value}: {file_total:,} строк",
@@ -2279,7 +2316,9 @@ class TSVToExcelConverter(QThread):
                 sorted_sheets = sorted(
                     sheet_counts.items(), key=lambda item: item[1], reverse=True
                 )
-                for sheet_index, (sheet_value, count) in enumerate(sorted_sheets, start=1):
+                for sheet_index, (sheet_value, count) in enumerate(
+                    sorted_sheets, start=1
+                ):
                     self.log_message.emit(
                         f"   {sheet_index}. Лист: {sheet_value}: {count:,} строк",
                         QColor("gray"),
@@ -2295,7 +2334,9 @@ class TSVToExcelConverter(QThread):
 
         t_close = time.time() - t_close_start
         self._timing["close_workbook"] = t_close
-        self._timing["close_workbook_total"] = self._timing.get("close_workbook_total", 0) + t_close
+        self._timing["close_workbook_total"] = (
+            self._timing.get("close_workbook_total", 0) + t_close
+        )
 
         if len(open_workbooks) > 100:
             self.log_message.emit(
@@ -2313,10 +2354,6 @@ class TSVToExcelConverter(QThread):
         headers: List[str],
         file_targets: List[tuple[int, str, str]],
         sheet_targets: List[tuple[int, str, str]],
-        single_file_idx,
-        single_file_vals: Set[str],
-        single_sheet_idx,
-        single_sheet_vals: Set[str],
         filter_idx,
         base_name: str,
         current_file: str,
@@ -2430,25 +2467,17 @@ class TSVToExcelConverter(QThread):
             if file_targets:
                 matched = self._match_target_indices(row, file_targets)
                 return matched if matched else ["rest"]
-            if single_file_idx is not None:
-                value = self._get_split_value(row, single_file_idx, single_file_vals)
-                return [value] if value else []
             return ["only"]
 
         def _sheet_dests(row) -> List[Any]:
             if sheet_targets:
                 matched = self._match_target_indices(row, sheet_targets)
                 return matched if matched else ["rest"]
-            if single_sheet_idx is not None:
-                value = self._get_split_value(row, single_sheet_idx, single_sheet_vals)
-                return [value] if value else []
             return ["only"]
 
         def _sheet_base(file_key, sheet_key) -> str:
             if sheet_targets:
                 return _sheet_stem(sheet_key)
-            if single_sheet_idx is not None:
-                return str(sheet_key)
             if file_targets:
                 return _file_stem(file_key)
             return str(file_key)
@@ -2497,9 +2526,7 @@ class TSVToExcelConverter(QThread):
                         )
                         worksheet = workbook.add_worksheet(sheet_name)
                         for col, header in enumerate(output_headers):
-                            worksheet.write(
-                                0, col, header, workbook._tsv_header_format
-                            )
+                            worksheet.write(0, col, header, workbook._tsv_header_format)
                         worksheets[file_key][sheet_key] = worksheet
                         row_counts[file_key][sheet_key] = 1
                         current_row = 1
@@ -2508,7 +2535,9 @@ class TSVToExcelConverter(QThread):
                         current_row, 0, output_row, workbook._tsv_cell_format
                     )
                     row_counts[file_key][sheet_key] = current_row + 1
-                    hierarchy_counts[_file_label(file_key)][_sheet_label(sheet_key)] += 1
+                    hierarchy_counts[_file_label(file_key)][
+                        _sheet_label(sheet_key)
+                    ] += 1
                     written = True
             return written
 
@@ -2522,13 +2551,17 @@ class TSVToExcelConverter(QThread):
         )
 
         if hierarchy_counts:
-            self.log_message.emit("Итоговое распределение по файлам и листам:", QColor("blue"))
+            self.log_message.emit(
+                "Итоговое распределение по файлам и листам:", QColor("blue")
+            )
             sorted_files = sorted(
                 hierarchy_counts.items(),
                 key=lambda item: sum(item[1].values()),
                 reverse=True,
             )
-            for file_index, (file_value, sheet_counts) in enumerate(sorted_files, start=1):
+            for file_index, (file_value, sheet_counts) in enumerate(
+                sorted_files, start=1
+            ):
                 file_total = sum(sheet_counts.values())
                 self.log_message.emit(
                     f"{file_index}. Файл: {file_value}: {file_total:,} строк",
@@ -2537,7 +2570,9 @@ class TSVToExcelConverter(QThread):
                 sorted_sheets = sorted(
                     sheet_counts.items(), key=lambda item: item[1], reverse=True
                 )
-                for sheet_index, (sheet_value, count) in enumerate(sorted_sheets, start=1):
+                for sheet_index, (sheet_value, count) in enumerate(
+                    sorted_sheets, start=1
+                ):
                     self.log_message.emit(
                         f"   {sheet_index}. Лист: {sheet_value}: {count:,} строк",
                         QColor("gray"),
@@ -2552,7 +2587,9 @@ class TSVToExcelConverter(QThread):
                 pass
         t_close = time.time() - t_close_start
         self._timing["close_workbook"] = t_close
-        self._timing["close_workbook_total"] = self._timing.get("close_workbook_total", 0) + t_close
+        self._timing["close_workbook_total"] = (
+            self._timing.get("close_workbook_total", 0) + t_close
+        )
 
         if len(open_workbooks) > 100:
             self.log_message.emit(
@@ -2563,7 +2600,7 @@ class TSVToExcelConverter(QThread):
 
         self.output_file_path = self.output_directory
         self.generated_files.extend(output_files)
-        if not file_targets and single_file_idx is None and len(output_files) == 1:
+        if not file_targets and len(output_files) == 1:
             self.output_file_path = output_files[0]
 
     def _convert_without_split(

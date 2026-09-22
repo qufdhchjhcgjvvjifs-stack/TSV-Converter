@@ -854,7 +854,10 @@ class UniqueValuesWorker(QThread):
                                 if extra_indices:
                                     passed = True
                                     for extra_idx, allowed in extra_indices:
-                                        if extra_idx >= len(row) or row[extra_idx] not in allowed:
+                                        if (
+                                            extra_idx >= len(row)
+                                            or row[extra_idx] not in allowed
+                                        ):
                                             passed = False
                                             break
                                     if not passed:
@@ -1550,6 +1553,7 @@ class ColumnValuesDialog(QDialog):
             == Qt.CheckState.Checked
         ]
 
+
 class ColumnSelectionDialog(QDialog):
     """
     Диалог выбора итоговых столбцов и их порядка.
@@ -1594,7 +1598,9 @@ class ColumnSelectionDialog(QDialog):
         layout.addWidget(self.search_edit)
 
         self.column_list = ColumnCheckBoxListWidget(parent=self, is_dark=self._is_dark)
-        self.column_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.column_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
         self.column_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.column_list.setDragDropOverwriteMode(False)
         self.column_list.setDefaultDropAction(Qt.DropAction.MoveAction)
@@ -1653,10 +1659,7 @@ class ColumnSelectionDialog(QDialog):
         selected_set = set(self._selected_columns)
         for column in ordered_columns:
             item = QListWidgetItem(column)
-            item.setFlags(
-                item.flags()
-                | Qt.ItemFlag.ItemIsDragEnabled
-            )
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsDragEnabled)
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
             item.setData(Qt.ItemDataRole.UserRole, column)
             self.column_list.addItem(item)
@@ -1698,7 +1701,9 @@ class ColumnSelectionDialog(QDialog):
 
     def _reset_order(self):
         selected = set(self.get_selected_columns())
-        self._selected_columns = [column for column in self._headers if column in selected]
+        self._selected_columns = [
+            column for column in self._headers if column in selected
+        ]
         self._load_columns()
 
     def _update_info(self):
@@ -1712,9 +1717,7 @@ class ColumnSelectionDialog(QDialog):
             if not self.column_list.item(row).isHidden()
         )
         suffix = (
-            f", найдено: {visible_count}"
-            if visible_count != len(self._headers)
-            else ""
+            f", найдено: {visible_count}" if visible_count != len(self._headers) else ""
         )
         self.info_label.setText(
             f"Выбрано столбцов: {selected_count} из {len(self._headers)}{suffix}"
@@ -3466,7 +3469,9 @@ class MainWindow(QMainWindow):
             existing_selected = [
                 column for column in self._selected_output_columns if column in headers
             ]
-            new_columns = [column for column in headers if column not in existing_selected]
+            new_columns = [
+                column for column in headers if column not in existing_selected
+            ]
             self._selected_output_columns = existing_selected + new_columns
         else:
             self._selected_output_columns = []
@@ -3646,7 +3651,9 @@ class MainWindow(QMainWindow):
                 self.file_split_options_btn.setEnabled(enabled)
                 self.sheet_split_options_btn.setEnabled(enabled)
                 self.filter_options_btn.setEnabled(enabled)
-            self.columns_btn.setEnabled(file_count == 1 and bool(self._available_headers))
+            self.columns_btn.setEnabled(
+                file_count == 1 and bool(self._available_headers)
+            )
             self.columns_btn.setToolTip("")
 
         self._update_columns_info()
@@ -3748,7 +3755,11 @@ class MainWindow(QMainWindow):
         Цели разделения файлов/листов сюда НЕ входят: они ничего не
         отфильтровывают, а задают раскладку (union + "Все остальное").
         """
-        return {column: sorted(values) for column, values in self._adv_filter_map.items() if values}
+        return {
+            column: sorted(values)
+            for column, values in self._adv_filter_map.items()
+            if values
+        }
 
     def get_filter_advanced(self) -> Dict[str, List[str]]:
         """Multi-ограничения кнопки «Фильтр по столбцу» (И-фильтрация строк)."""
@@ -3802,7 +3813,9 @@ class MainWindow(QMainWindow):
             mapping = self._get_adv_map(dimension)
             if mapping:
                 btn.setText("...•")
-                btn.setToolTip(f"Активно: {self._summarize_adv_map(mapping)} (нажмите для замены/очистки)")
+                btn.setToolTip(
+                    f"Активно: {self._summarize_adv_map(mapping)} (нажмите для замены/очистки)"
+                )
             else:
                 btn.setText("...")
                 hints = {
@@ -3841,9 +3854,7 @@ class MainWindow(QMainWindow):
             "files": "Разделение на файлы",
             "sheets": "Разделение на листы",
         }
-        dialog_title = (
-            "Multi-разделение" if is_split else "Multi-ограничения"
-        )
+        dialog_title = "Multi-разделение" if is_split else "Multi-ограничения"
         file_caption = (
             "Выберите Excel с раскладкой (A=столбец, B=значение)"
             if is_split
@@ -3918,6 +3929,12 @@ class MainWindow(QMainWindow):
         )
         self._update_options_buttons()
         if is_split:
+            # Сбрасываем комбо ДРУГОГО измерения, чтобы не создавало
+            # отдельные файлы параллельно с целями текущего измерения.
+            if dimension == "sheets":
+                self.file_split_column_combo.setCurrentText("Не разделять на файлы")
+            else:
+                self.split_column_combo.setCurrentText("Не разделять на листы")
             total_targets = sum(len(values) for values in loaded.values())
             self.log_message(
                 f"Multi-разделение [{titles.get(dimension, dimension)}]: "
@@ -4029,9 +4046,7 @@ class MainWindow(QMainWindow):
             deduplicate_rows=True,
             ram_threshold=self._settings.get("ram_threshold", 500000),
             advanced_filters=self.get_filter_advanced() if len(files) == 1 else {},
-            file_split_targets=self.get_file_split_targets()
-            if len(files) == 1
-            else {},
+            file_split_targets=self.get_file_split_targets() if len(files) == 1 else {},
             sheet_split_targets=self.get_sheet_split_targets()
             if len(files) == 1
             else {},

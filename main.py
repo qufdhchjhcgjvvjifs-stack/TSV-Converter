@@ -6,7 +6,6 @@
 import sys
 import os
 import csv
-import hashlib
 from datetime import datetime
 from collections import defaultdict
 
@@ -56,17 +55,6 @@ class TSVConverterApp:
 
         # Таймер
         self._timer.timeout.connect(self._update_timer)
-
-    @staticmethod
-    def _dedup_key(values):
-        """Компактный ключ дедупликации без хранения всех строковых значений."""
-        digest = hashlib.blake2b(digest_size=16)
-        for value in values:
-            data = value.encode("utf-8", errors="replace")
-            digest.update(str(len(data)).encode("ascii"))
-            digest.update(b":")
-            digest.update(data)
-        return digest.digest()
 
     def _connect_signals(self):
         """Подключает сигналы GUI к обработчикам."""
@@ -258,14 +246,18 @@ class TSVConverterApp:
                     if file_split_col and file_split_col != "Не разделять на файлы":
                         try:
                             file_split_idx = headers.index(file_split_col)
-                            file_split_vals = set(file_split_values.get(file_split_col, []))
+                            file_split_vals = set(
+                                file_split_values.get(file_split_col, [])
+                            )
                         except ValueError:
                             file_split_idx = None
 
                     if sheet_split_col and sheet_split_col != "Не разделять на листы":
                         try:
                             sheet_split_idx = headers.index(sheet_split_col)
-                            sheet_split_vals = set(sheet_split_values.get(sheet_split_col, []))
+                            sheet_split_vals = set(
+                                sheet_split_values.get(sheet_split_col, [])
+                            )
                         except ValueError:
                             sheet_split_idx = None
 
@@ -312,12 +304,17 @@ class TSVConverterApp:
                             if not passed:
                                 continue
                         if filter_idx is not None and filter_vals:
-                            if filter_idx >= len(row) or row[filter_idx] not in filter_vals:
+                            if (
+                                filter_idx >= len(row)
+                                or row[filter_idx] not in filter_vals
+                            ):
                                 continue
 
                         file_split_value = None
                         if file_split_idx is not None:
-                            value = row[file_split_idx] if file_split_idx < len(row) else ""
+                            value = (
+                                row[file_split_idx] if file_split_idx < len(row) else ""
+                            )
                             if not value or not value.strip():
                                 continue
                             file_split_value = (
@@ -328,7 +325,11 @@ class TSVConverterApp:
 
                         sheet_split_value = None
                         if sheet_split_idx is not None:
-                            value = row[sheet_split_idx] if sheet_split_idx < len(row) else ""
+                            value = (
+                                row[sheet_split_idx]
+                                if sheet_split_idx < len(row)
+                                else ""
+                            )
                             if not value or not value.strip():
                                 continue
                             sheet_split_value = (
@@ -338,11 +339,14 @@ class TSVConverterApp:
                             )
 
                         if output_indices:
-                            row_key = TSVConverterApp._dedup_key(
+                            row_key = TSVToExcelConverter._dedup_key(
                                 row[index] if index < len(row) else ""
                                 for index in output_indices
                             )
-                            if file_split_value is not None or sheet_split_value is not None:
+                            if (
+                                file_split_value is not None
+                                or sheet_split_value is not None
+                            ):
                                 destination_key = (file_split_value, sheet_split_value)
                                 if row_key in seen_rows_by_destination[destination_key]:
                                     continue
@@ -408,7 +412,11 @@ class TSVConverterApp:
 
     def _on_advanced_filters_changed(self, dimension: str):
         """Обработчик загрузки/очистки Excel-файлов через кнопки ...."""
-        titles = {"filter": "Фильтр", "files": "Разделение на файлы", "sheets": "Разделение на листы"}
+        titles = {
+            "filter": "Фильтр",
+            "files": "Разделение на файлы",
+            "sheets": "Разделение на листы",
+        }
         if dimension == "filter":
             combined = self._get_combined_advanced_filters()
             if combined:
@@ -465,7 +473,7 @@ class TSVConverterApp:
         seen_rows_by_destination = defaultdict(set)
         total_rows = 0
         REST_LABEL = "Все остальное"
-        
+
         filter_vals = None
         if filter_col and filter_col != "Не фильтровать":
             filter_vals = set(filter_values_dict.get(filter_col, []))
@@ -488,9 +496,7 @@ class TSVConverterApp:
                 if column not in header_to_index or not targets[column]:
                     continue
                 for value in sorted(set(targets[column])):
-                    resolved.append(
-                        (header_to_index[column], column, value)
-                    )
+                    resolved.append((header_to_index[column], column, value))
             return resolved
 
         def match_labels(row, resolved):
@@ -517,7 +523,10 @@ class TSVConverterApp:
                                 continue
                             file_split_idx = headers.index(file_split_col)
 
-                        if sheet_split_col and sheet_split_col != "Не разделять на листы":
+                        if (
+                            sheet_split_col
+                            and sheet_split_col != "Не разделять на листы"
+                        ):
                             if sheet_split_col not in headers:
                                 continue
                             sheet_split_idx = headers.index(sheet_split_col)
@@ -533,7 +542,7 @@ class TSVConverterApp:
                                 for column in selected_columns
                                 if column in header_to_index
                             ]
-                        
+
                         filter_idx = None
                         if filter_vals:
                             try:
@@ -545,7 +554,9 @@ class TSVConverterApp:
                         for column, values in advanced_filters.items():
                             if values:
                                 try:
-                                    adv_indices.append((headers.index(column), set(values)))
+                                    adv_indices.append(
+                                        (headers.index(column), set(values))
+                                    )
                                 except ValueError:
                                     continue
 
@@ -555,19 +566,25 @@ class TSVConverterApp:
                             file_split_idx = None
                         if sheet_resolved and sheet_split_idx is not None:
                             sheet_split_idx = None
-                        
+
                         for row in reader:
                             if adv_indices:
                                 passed = True
                                 for adv_idx, allowed in adv_indices:
-                                    if adv_idx >= len(row) or row[adv_idx] not in allowed:
+                                    if (
+                                        adv_idx >= len(row)
+                                        or row[adv_idx] not in allowed
+                                    ):
                                         passed = False
                                         break
                                 if not passed:
                                     continue
                             # Фильтр
                             if filter_idx is not None:
-                                if filter_idx >= len(row) or row[filter_idx] not in filter_vals:
+                                if (
+                                    filter_idx >= len(row)
+                                    or row[filter_idx] not in filter_vals
+                                ):
                                     continue
 
                             if file_resolved:
@@ -598,20 +615,25 @@ class TSVConverterApp:
                             for file_key in file_keys:
                                 for sheet_key in sheet_keys:
                                     if output_indices:
-                                        row_key = TSVConverterApp._dedup_key(
+                                        row_key = TSVToExcelConverter._dedup_key(
                                             row[idx] if idx < len(row) else ""
                                             for idx in output_indices
                                         )
                                         destination_key = (file_key, sheet_key)
-                                        if row_key in seen_rows_by_destination[destination_key]:
+                                        if (
+                                            row_key
+                                            in seen_rows_by_destination[destination_key]
+                                        ):
                                             continue
-                                        seen_rows_by_destination[destination_key].add(row_key)
+                                        seen_rows_by_destination[destination_key].add(
+                                            row_key
+                                        )
 
                                     counts[file_key][sheet_key] += 1
                                     row_written = True
                             if row_written:
                                 total_rows += 1
-                                
+
                     except (ValueError, StopIteration):
                         continue
             except (OSError, IOError, UnicodeDecodeError):
@@ -632,9 +654,15 @@ class TSVConverterApp:
         counts = result.get("counts", {}) if isinstance(result, dict) else {}
         total_rows = result.get("total_rows", 0) if isinstance(result, dict) else 0
         file_column = result.get("file_column", "") if isinstance(result, dict) else ""
-        sheet_column = result.get("sheet_column", "") if isinstance(result, dict) else ""
-        multi_file = result.get("multi_file", False) if isinstance(result, dict) else False
-        multi_sheet = result.get("multi_sheet", False) if isinstance(result, dict) else False
+        sheet_column = (
+            result.get("sheet_column", "") if isinstance(result, dict) else ""
+        )
+        multi_file = (
+            result.get("multi_file", False) if isinstance(result, dict) else False
+        )
+        multi_sheet = (
+            result.get("multi_sheet", False) if isinstance(result, dict) else False
+        )
         has_file_split = bool(
             multi_file or (file_column and file_column != "Не разделять на файлы")
         )
@@ -643,16 +671,22 @@ class TSVConverterApp:
         )
 
         if not counts:
-            self._log_message("Анализ разделения: нет данных для распределения", QColor("orange"))
+            self._log_message(
+                "Анализ разделения: нет данных для распределения", QColor("orange")
+            )
             return
 
         self._log_message("=== Прогноз разделения ===", QColor("cyan"))
         if multi_file:
-            self._log_message("Файлы: multi-раскладка из Excel + Все остальное", QColor("blue"))
+            self._log_message(
+                "Файлы: multi-раскладка из Excel + Все остальное", QColor("blue")
+            )
         elif has_file_split:
             self._log_message(f"Файлы по столбцу: {file_column}", QColor("blue"))
         if multi_sheet:
-            self._log_message("Листы: multi-раскладка из Excel + Все остальное", QColor("blue"))
+            self._log_message(
+                "Листы: multi-раскладка из Excel + Все остальное", QColor("blue")
+            )
         elif has_sheet_split:
             self._log_message(f"Листы по столбцу: {sheet_column}", QColor("blue"))
 
@@ -660,7 +694,9 @@ class TSVConverterApp:
             sorted_files = sorted(
                 counts.items(), key=lambda item: sum(item[1].values()), reverse=True
             )
-            for file_idx, (file_value, sheet_counts) in enumerate(sorted_files, start=1):
+            for file_idx, (file_value, sheet_counts) in enumerate(
+                sorted_files, start=1
+            ):
                 file_total = sum(sheet_counts.values())
                 self._log_message(
                     f"{file_idx}. Файл: {file_value}: {file_total:,} строк",
@@ -669,7 +705,9 @@ class TSVConverterApp:
                 sorted_sheets = sorted(
                     sheet_counts.items(), key=lambda item: item[1], reverse=True
                 )
-                for sheet_idx, (sheet_value, count) in enumerate(sorted_sheets, start=1):
+                for sheet_idx, (sheet_value, count) in enumerate(
+                    sorted_sheets, start=1
+                ):
                     self._log_message(
                         f"   {sheet_idx}. Лист: {sheet_value}: {count:,} строк",
                         QColor("gray"),
@@ -697,11 +735,17 @@ class TSVConverterApp:
         item_type = "файлов" if has_file_split else "листов"
         item_count = len(counts) if has_file_split else len(counts.get("", {}))
         self._log_message("-" * 40, QColor("cyan"))
-        self._log_message(f"Итого будет создано {item_type}: {item_count}", QColor("blue"))
+        self._log_message(
+            f"Итого будет создано {item_type}: {item_count}", QColor("blue")
+        )
         if has_file_split and has_sheet_split:
             total_sheets = sum(len(sheet_counts) for sheet_counts in counts.values())
-            self._log_message(f"Итого листов внутри файлов: {total_sheets}", QColor("blue"))
-        self._log_message(f"Всего строк к распределению: {total_rows:,}", QColor("blue"))
+            self._log_message(
+                f"Итого листов внутри файлов: {total_sheets}", QColor("blue")
+            )
+        self._log_message(
+            f"Всего строк к распределению: {total_rows:,}", QColor("blue")
+        )
 
     def _on_split_distribution_error(self, error):
         """Обработчик ошибки подсчета распределения."""
@@ -764,7 +808,7 @@ class TSVConverterApp:
                 storage[column] = selected
                 self._warn_if_combined_split(dimension)
                 self._update_total_rows()
-                
+
                 # Показываем лоадер на главном окне
                 self.window._show_loading_overlay("Анализ распределения данных...")
 
@@ -780,7 +824,7 @@ class TSVConverterApp:
                     if sheet_split_col != "Не разделять на листы"
                     else []
                 )
-                
+
                 # Запускаем подсчет
                 worker = LoadingWorker(
                     self._count_split_distribution_task,
@@ -796,14 +840,14 @@ class TSVConverterApp:
                     self._get_file_split_targets(),
                     self._get_sheet_split_targets(),
                 )
-                
+
                 worker.finished.connect(self._on_split_distribution_calculated)
-                worker.error.connect(
-                    lambda err: self._on_split_distribution_error(err)
-                )
-                
+                worker.error.connect(lambda err: self._on_split_distribution_error(err))
+
                 # Очищаем и сохраняем воркера
-                self._active_workers = [w for w in self._active_workers if w.isRunning()]
+                self._active_workers = [
+                    w for w in self._active_workers if w.isRunning()
+                ]
                 self._active_workers.append(worker)
                 worker.start()
             else:
@@ -1160,9 +1204,17 @@ class TSVConverterApp:
             return
 
         files_to_delete = []
-        if hasattr(self.converter, "generated_files") and self.converter.generated_files:
-            files_to_delete = [f for f in self.converter.generated_files if os.path.exists(f)]
-        elif hasattr(self.converter, "output_file_path") and self.converter.output_file_path:
+        if (
+            hasattr(self.converter, "generated_files")
+            and self.converter.generated_files
+        ):
+            files_to_delete = [
+                f for f in self.converter.generated_files if os.path.exists(f)
+            ]
+        elif (
+            hasattr(self.converter, "output_file_path")
+            and self.converter.output_file_path
+        ):
             path = self.converter.output_file_path
             if path and os.path.isfile(path):
                 files_to_delete = [path]
@@ -1175,7 +1227,7 @@ class TSVConverterApp:
             if len(files_to_delete) > 1
             else "Удалить сгенерированный файл?"
         )
-        
+
         msgbox = self._show_message_box(
             QMessageBox.Icon.Question,
             "Подтверждение",
@@ -1191,13 +1243,20 @@ class TSVConverterApp:
                     os.remove(path)
                     deleted_count += 1
                 except Exception as e:
-                    self._log_message(f"Ошибка удаления файла {os.path.basename(path)}: {str(e)}", QColor("red"))
+                    self._log_message(
+                        f"Ошибка удаления файла {os.path.basename(path)}: {str(e)}",
+                        QColor("red"),
+                    )
 
             self.window.open_file_btn.setEnabled(False)
             self.window.delete_file_btn.setEnabled(False)
-            
+
             if deleted_count > 0:
-                msg = f"Удалено файлов: {deleted_count}" if deleted_count > 1 else "Файл удалён"
+                msg = (
+                    f"Удалено файлов: {deleted_count}"
+                    if deleted_count > 1
+                    else "Файл удалён"
+                )
                 self._log_message(msg, QColor("red"))
 
     def _export_report(self):
