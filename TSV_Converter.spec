@@ -8,9 +8,8 @@ block_cipher = None
 excluded_modules = [
     'tkinter',
     'unittest',
-    'email',
-    'http',
-    'xmlrpc',
+    # 'email', 'http', 'xmlrpc' нельзя исключать:
+    # нужны pkg_resources/setuptools (цепочка jaraco -> urllib) на старте.
     'numpy',
     'pandas',
     'matplotlib',
