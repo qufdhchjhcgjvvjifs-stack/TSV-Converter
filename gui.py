@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QFileDialog,
     QMessageBox,
+    QMenu,
     QListWidget,
     QListWidgetItem,
     QComboBox,
@@ -48,8 +49,10 @@ from PySide6.QtCore import (
     QSize,
 )
 from PySide6.QtGui import (
+    QAction,
     QColor,
     QFont,
+    QKeySequence,
     QPalette,
     QDragEnterEvent,
     QDropEvent,
@@ -2534,6 +2537,22 @@ class TSVPreviewDialog(QDialog):
 
         # Таблица
         self.table_widget = QTableWidget()
+        self.table_widget.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self.table_widget.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectItems
+        )
+        self.table_widget.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.copy_action = QAction("Копировать", self.table_widget)
+        self.copy_action.setShortcut(QKeySequence.StandardKey.Copy)
+        self.copy_action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        self.copy_action.triggered.connect(self._copy_selected_cells)
+        self.table_widget.addAction(self.copy_action)
+        self.table_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table_widget.customContextMenuRequested.connect(
+            self._show_table_context_menu
+        )
         layout.addWidget(self.table_widget)
 
         # Навигация
@@ -2681,6 +2700,35 @@ class TSVPreviewDialog(QDialog):
 
         if self._active_search_text:
             self._highlight_search_matches_on_page()
+
+    def _copy_selected_cells(self):
+        """Копирует выделенные ячейки в буфер обмена в формате TSV."""
+        selected = self.table_widget.selectedIndexes()
+        if not selected:
+            return
+        rows = sorted({index.row() for index in selected})
+        cols = sorted({index.column() for index in selected})
+        selected_cells = {(index.row(), index.column()) for index in selected}
+        lines = []
+        for row in rows:
+            cells = []
+            for col in cols:
+                if (row, col) in selected_cells:
+                    item = self.table_widget.item(row, col)
+                    cells.append(item.text() if item is not None else "")
+                else:
+                    cells.append("")
+            lines.append("\t".join(cells))
+        QApplication.clipboard().setText("\n".join(lines))
+
+    def _show_table_context_menu(self, position):
+        """Показывает контекстное меню таблицы (Копировать)."""
+        if not self.table_widget.selectedIndexes():
+            return
+        menu = QMenu(self.table_widget)
+        menu.setPalette(self.table_widget.palette())
+        menu.addAction(self.copy_action)
+        menu.exec(self.table_widget.viewport().mapToGlobal(position))
 
     def _load_page_data(self):
         """Загружает данные для текущей страницы."""
