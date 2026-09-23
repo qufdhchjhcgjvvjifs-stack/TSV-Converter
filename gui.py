@@ -69,7 +69,7 @@ from typing import Optional, Dict, List, Set, Any
 # Импортируем утилиты из converter.py
 from converter import FileUtilities, ConversionConfig
 
-APP_VERSION = "20.3"
+APP_VERSION = "20.4"
 
 
 # ============================================================================
@@ -2548,6 +2548,11 @@ class TSVPreviewDialog(QDialog):
         self.search_btn.clicked.connect(self._search)
         search_layout.addWidget(self.search_btn)
 
+        self.reset_search_btn = SecondaryButton("Сбросить")
+        self.reset_search_btn.setToolTip("Очистить поиск и показать все строки")
+        self.reset_search_btn.clicked.connect(self._reset_search)
+        search_layout.addWidget(self.reset_search_btn)
+
         self.search_info_label = QLabel("")
         search_layout.addWidget(self.search_info_label)
 
@@ -2684,6 +2689,7 @@ class TSVPreviewDialog(QDialog):
         self.search_edit.setEnabled(enabled)
         self.search_column_combo.setEnabled(enabled)
         self.search_btn.setEnabled(enabled)
+        self.reset_search_btn.setEnabled(enabled)
         self.table_widget.setEnabled(enabled)
         self.prev_btn.setEnabled(enabled)
         self.next_btn.setEnabled(enabled)
@@ -2717,8 +2723,10 @@ class TSVPreviewDialog(QDialog):
 
         self.table_widget.resizeColumnsToContents()
 
-        if self._active_search_text:
-            self._highlight_search_matches_on_page()
+    def _reset_search(self):
+        """Сбрасывает поиск и показывает все строки."""
+        self.search_edit.clear()
+        self._search()
 
     def _copy_selected_cells(self):
         """Копирует выделенные ячейки в буфер обмена в формате TSV."""
@@ -2749,9 +2757,26 @@ class TSVPreviewDialog(QDialog):
         menu.addAction(self.copy_action)
         menu.exec(self.table_widget.viewport().mapToGlobal(position))
 
+    def _view_total_rows(self) -> int:
+        """Строк в текущем представлении: все или только совпадения поиска."""
+        if self._active_search_text:
+            return len(self._search_match_positions)
+        return self._total_rows
+
+    def _view_total_pages(self) -> int:
+        """Страниц в текущем представлении."""
+        return max(
+            1,
+            (self._view_total_rows() + self._rows_per_page - 1) // self._rows_per_page,
+        )
+
     def _load_page_data(self):
-        """Загружает данные для текущей страницы."""
+        """Загружает данные для текущей страницы (с учётом фильтра поиска)."""
         try:
+            if self._active_search_text:
+                self._render_page_rows(self._load_match_page_rows())
+                return
+
             start_row = (self._current_page - 1) * self._rows_per_page
             page_rows = []
 
@@ -2787,14 +2812,38 @@ class TSVPreviewDialog(QDialog):
             apply_theme_to_messagebox(msgbox, get_widget_theme_flag(self))
             msgbox.exec()
 
+    def _load_match_page_rows(self):
+        """Читает из файла только совпадения текущей страницы (один проход)."""
+        start = (self._current_page - 1) * self._rows_per_page
+        page_positions = self._search_match_positions[
+            start : start + self._rows_per_page
+        ]
+        wanted = set(page_positions)
+        page_rows = []
+        if not wanted:
+            return page_rows
+        with open(self._file_path, "r", encoding=self._encoding, errors="replace") as f:
+            reader = csv.reader(f, delimiter=self._delimiter)
+            next(reader, None)  # Пропускаем заголовок
+            for row_idx, row in enumerate(reader):
+                if row_idx in wanted:
+                    page_rows.append(row)
+                    if len(page_rows) >= len(wanted):
+                        break
+        return page_rows
+
     def _update_page_info(self):
         """Обновляет информацию о странице."""
-        total_pages = max(
-            1, (self._total_rows + self._rows_per_page - 1) // self._rows_per_page
-        )
-        self.page_info_label.setText(
-            f"Стр. {self._current_page} из {total_pages} (Всего: {self._total_rows})"
-        )
+        total_pages = self._view_total_pages()
+        if self._active_search_text:
+            self.page_info_label.setText(
+                f"Стр. {self._current_page} из {total_pages} "
+                f"(Найдено: {self._view_total_rows()})"
+            )
+        else:
+            self.page_info_label.setText(
+                f"Стр. {self._current_page} из {total_pages} (Всего: {self._total_rows})"
+            )
 
     def _prev_page(self):
         if self._current_page > 1:
@@ -2803,10 +2852,7 @@ class TSVPreviewDialog(QDialog):
             self._update_page_info()
 
     def _next_page(self):
-        total_pages = max(
-            1, (self._total_rows + self._rows_per_page - 1) // self._rows_per_page
-        )
-        if self._current_page < total_pages:
+        if self._current_page < self._view_total_pages():
             self._current_page += 1
             self._load_page_data()
             self._update_page_info()
@@ -2829,32 +2875,20 @@ class TSVPreviewDialog(QDialog):
                 return True
         return False
 
-    def _highlight_search_matches_on_page(self):
-        """Подсвечивает ячейки с совпадениями на текущей странице."""
-        if not self._active_search_text:
-            return
-        search_lower = self._active_search_text.lower()
-        for row_idx in range(self.table_widget.rowCount()):
-            for col_idx in range(self.table_widget.columnCount()):
-                item = self.table_widget.item(row_idx, col_idx)
-                if item and search_lower in item.text().lower():
-                    item.setBackground(QColor(255, 255, 0))
-                else:
-                    item.setBackground(QPalette().window())
-
     def _search(self):
-        """Выполняет поиск по файлу."""
-        search_text = self.search_edit.text()
+        """Фильтрует таблицу: оставляет только строки с совпадениями."""
+        search_text = self.search_edit.text().strip()
         column_text = self.search_column_combo.currentText()
 
         if not search_text:
             self._active_search_text = ""
             self._search_match_positions = []
             self.search_info_label.setText("")
+            self._current_page = 1
             self._load_page_data()
+            self._update_page_info()
             return
 
-        search_lower = search_text.lower()
         column_idx = -1
         if column_text != "Все столбцы" and self._headers:
             try:
@@ -2862,9 +2896,7 @@ class TSVPreviewDialog(QDialog):
             except ValueError:
                 column_idx = -1
 
-        self._active_search_text = search_text
-
-        self._search_match_positions = []
+        match_positions = []
 
         try:
             with open(
@@ -2874,26 +2906,27 @@ class TSVPreviewDialog(QDialog):
                 next(reader, None)
 
                 for row_idx, row in enumerate(reader):
-                    if self._row_matches_search(row, search_lower, column_idx):
-                        self._search_match_positions.append(row_idx)
+                    if self._row_matches_search(row, search_text, column_idx):
+                        match_positions.append(row_idx)
 
         except Exception as e:
             self.search_info_label.setText(f"Ошибка поиска: {e}")
             return
 
-        if not self._search_match_positions:
+        if not match_positions:
+            self._active_search_text = ""
+            self._search_match_positions = []
             self.search_info_label.setText("Ничего не найдено")
+            self._current_page = 1
+            self._load_page_data()
+            self._update_page_info()
             return
 
-        first_match_row = self._search_match_positions[0]
-        match_page = first_match_row // self._rows_per_page + 1
+        self._active_search_text = search_text
+        self._search_match_positions = match_positions
+        self.search_info_label.setText(f"Найдено: {len(match_positions)}")
 
-        total_matches = len(self._search_match_positions)
-        self.search_info_label.setText(
-            f"Найдено: {total_matches}, первая на стр. {match_page}"
-        )
-
-        self._current_page = match_page
+        self._current_page = 1
         self._load_page_data()
         self._update_page_info()
 
