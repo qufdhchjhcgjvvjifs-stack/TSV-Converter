@@ -69,7 +69,7 @@ from typing import Optional, Dict, List, Set, Any
 # Импортируем утилиты из converter.py
 from converter import FileUtilities, ConversionConfig
 
-APP_VERSION = "20.4"
+APP_VERSION = "20.5"
 
 
 # ============================================================================

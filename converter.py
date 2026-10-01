@@ -511,10 +511,57 @@ class TSVToExcelConverter(QThread):
         return f"{source_name} (conver_{timestamp})"
 
     # Архитектурные константы
-    MAX_EXCEL_ROWS = 1000000  # Ограничение в 1млн строк на один лист Excel
+    EXCEL_ROWS_LIMIT = 1_048_576  # Жёсткий предел Excel (xls_rowmax): индексы 0..1048575
+    MAX_EXCEL_ROWS = 1000000  # Безопасный рабочий порог на один лист Excel (с запасом)
     STOP_CHECK_INTERVAL = (
         2000  # Как часто (в строках) проверять флаг остановки конвертации
     )
+
+    @classmethod
+    def sheet_capacity(cls) -> int:
+        """Сколько строк данных помещается в один лист Excel (1 строка — заголовок)."""
+        return min(cls.MAX_EXCEL_ROWS, cls.EXCEL_ROWS_LIMIT) - 1
+
+    @classmethod
+    def plan_sheet_parts(cls, row_count: int) -> List[int]:
+        """
+        Разбивает N строк данных на физические листы Excel.
+
+        Возвращает список размеров частей: первый лист заполняется полностью,
+        в последнем остаётся остаток (так же работает движок записи).
+        """
+        capacity = cls.sheet_capacity()
+        if row_count <= 0:
+            return []
+        parts: List[int] = []
+        remaining = row_count
+        while remaining > 0:
+            chunk = min(capacity, remaining)
+            parts.append(chunk)
+            remaining -= chunk
+        return parts
+
+    @staticmethod
+    def sheet_part_name(base_name: str, part_index: int) -> str:
+        """Имя листа для части N: первая — базовое имя, дальше — с суффиксом _N."""
+        return base_name if part_index <= 1 else f"{base_name}_{part_index}"
+
+    def _log_sheet_parts(self, parts: List[tuple[str, int]]) -> None:
+        """
+        Сообщает в лог о листах, разбитых по лимиту Excel.
+
+        Args:
+            parts: Список пар (значение листа, номер части, начиная с 1)
+        """
+        split_items = [(value, index) for value, index in parts if index > 1]
+        if not split_items:
+            return
+        for value, index in split_items:
+            self.log_message.emit(
+                f"   Лист '{value}' превысил лимит Excel и разбит на {index} частей "
+                f"({self.sheet_part_name(value, index)} и далее)",
+                QColor("orange"),
+            )
 
     def __init__(
         self,
@@ -1916,6 +1963,7 @@ class TSVToExcelConverter(QThread):
         """Конвертация с разделением по столбцу."""
         worksheets: Dict[str, Any] = {}
         sheet_row_counts: Dict[str, int] = {}
+        sheet_part_index: Dict[str, int] = defaultdict(lambda: 1)
 
         used_names: Set[str] = set()
         MAX_ROWS = self.MAX_EXCEL_ROWS
@@ -1949,13 +1997,18 @@ class TSVToExcelConverter(QThread):
                 ws, row_count = _create_sheet_with_headers(sheet_name)
                 worksheets[value] = ws
                 sheet_row_counts[value] = row_count
+                sheet_part_index[value] = 1
 
             current_row = sheet_row_counts[value]
             if current_row >= MAX_ROWS:
-                sheet_name = FileUtilities.sanitize_sheet_name(f"{value}_2", used_names)
+                # Лист исчерпал лимит Excel — продолжаем в следующей части.
+                sheet_name = FileUtilities.sanitize_sheet_name(
+                    self.sheet_part_name(value, sheet_part_index[value] + 1), used_names
+                )
                 ws, current_row = _create_sheet_with_headers(sheet_name)
                 worksheets[value] = ws
                 sheet_row_counts[value] = current_row
+                sheet_part_index[value] += 1
 
             worksheets[value].write_row(
                 current_row, 0, output_row, self._cached_formats["cell"]
@@ -1971,6 +2024,9 @@ class TSVToExcelConverter(QThread):
             "Запись данных...",
             adv_indices,
         )
+
+        for value, part_index in list(sheet_part_index.items()):
+            self._log_sheet_parts([(value, part_index)])
 
     def _convert_with_split_to_files(
         self,
@@ -1988,7 +2044,11 @@ class TSVToExcelConverter(QThread):
         open_workbooks: Dict[str, xlsxwriter.Workbook] = {}
         open_worksheets: Dict[str, Any] = {}
         open_row_counts: Dict[str, int] = {}
+        sheet_part_index: Dict[str, int] = defaultdict(lambda: 1)
+        sheet_base_names: Dict[str, str] = {}
+        written_rows: Dict[str, int] = defaultdict(int)
         used_file_names: Set[str] = set()
+        used_sheet_names: Set[str] = set()
         file_paths: Dict[str, str] = {}
         selected_vals = self.file_split_values
         output_files: List[str] = []
@@ -2011,15 +2071,29 @@ class TSVToExcelConverter(QThread):
 
         self._timing["create_workbook"] = 0.0
 
+        def _add_sheet(value: str, part_index: int):
+            """Добавляет в книгу значения новый лист (часть N) с заголовками."""
+            workbook = open_workbooks[value]
+            sheet_name = FileUtilities.sanitize_sheet_name(
+                self.sheet_part_name(sheet_base_names[value], part_index),
+                used_sheet_names,
+            )
+            worksheet = workbook.add_worksheet(sheet_name)
+            for col, header in enumerate(output_headers):
+                worksheet.write(0, col, header, workbook._tsv_header_format)
+            sheet_part_index[value] = part_index
+            open_worksheets[value] = worksheet
+            open_row_counts[value] = 1
+
         def _create_workbook_for_value(value: str):
             """Создаёт новый workbook для значения."""
             t_create = time.time()
             safe_value = FileUtilities.sanitize_file_stem(value, used_file_names)
-            sheet_name = FileUtilities.sanitize_sheet_name(safe_value, used_file_names)
             file_path = os.path.join(
                 self.output_directory, f"{base_name}_{safe_value}.xlsx"
             )
             file_paths[value] = file_path
+            sheet_base_names[value] = safe_value
 
             if use_constant_memory:
                 workbook = xlsxwriter.Workbook(
@@ -2051,15 +2125,11 @@ class TSVToExcelConverter(QThread):
             if self.styles.get("border", 0) == 1:
                 cell_format.set_border(1)
 
-            worksheet = workbook.add_worksheet(sheet_name)
-
-            for col, header in enumerate(output_headers):
-                worksheet.write(0, col, header, header_format)
-
-            open_workbooks[value] = workbook
-            open_worksheets[value] = worksheet
-            open_row_counts[value] = 1
+            workbook._tsv_header_format = header_format
             workbook._tsv_cell_format = cell_format
+            open_workbooks[value] = workbook
+
+            _add_sheet(value, 1)
 
             output_files.append(file_path)
             self._timing["create_workbook"] += time.time() - t_create
@@ -2083,11 +2153,17 @@ class TSVToExcelConverter(QThread):
             if value not in open_worksheets or value not in open_row_counts:
                 return False
 
-            worksheet = open_worksheets[value]
             row_count = open_row_counts[value]
+            if row_count >= self.MAX_EXCEL_ROWS:
+                # Лист исчерпал лимит Excel — продолжаем в следующей части.
+                _add_sheet(value, sheet_part_index[value] + 1)
+                row_count = 1
+
+            worksheet = open_worksheets[value]
             workbook = open_workbooks[value]
             worksheet.write_row(row_count, 0, output_row, workbook._tsv_cell_format)
             open_row_counts[value] = row_count + 1
+            written_rows[value] += 1
             return True
 
         self._process_rows_with_progress(
@@ -2101,6 +2177,9 @@ class TSVToExcelConverter(QThread):
 
         self._emit_progress_update(current_file, "Сохранение файлов...", force=True)
         t_close_start = time.time()
+        # Фиксируем в логе файлы, чьи листы были разбиты по лимиту Excel.
+        for value, part_index in list(sheet_part_index.items()):
+            self._log_sheet_parts([(value, part_index)])
         # Закрываем все workbook
         for value, wb in open_workbooks.items():
             try:
@@ -2114,13 +2193,13 @@ class TSVToExcelConverter(QThread):
             self._timing.get("close_workbook_total", 0) + t_close
         )
 
-        # Удаляем файлы без данных (только заголовок)
-        # row_count = 1 означает только заголовок, без строк данных
+        # Удаляем файлы без данных (только заголовок).
+        # Учитываем многочастевые листы: файл пуст, только если не записано
+        # ни одной строки данных ни в одну из его частей.
         files_to_remove = []
-        for value, row_count in open_row_counts.items():
-            if row_count == 1:
-                if value in file_paths:
-                    files_to_remove.append(file_paths[value])
+        for value, rows_written in written_rows.items():
+            if rows_written == 0 and value in file_paths:
+                files_to_remove.append(file_paths[value])
 
         for file_path in files_to_remove:
             try:
@@ -2160,6 +2239,9 @@ class TSVToExcelConverter(QThread):
         open_workbooks: Dict[str, xlsxwriter.Workbook] = {}
         worksheets: Dict[str, Dict[str, Any]] = defaultdict(dict)
         row_counts: Dict[str, Dict[str, int]] = defaultdict(dict)
+        sheet_part_index: Dict[str, Dict[str, int]] = defaultdict(
+            lambda: defaultdict(lambda: 1)
+        )
         used_file_names: Set[str] = set()
         used_sheet_names: Dict[str, Set[str]] = defaultdict(set)
         output_files: List[str] = []
@@ -2242,6 +2324,7 @@ class TSVToExcelConverter(QThread):
                     worksheet.write(0, col, header, workbook._tsv_header_format)
                 worksheets[file_value][sheet_value] = worksheet
                 row_counts[file_value][sheet_value] = 1
+                sheet_part_index[file_value][sheet_value] = 1
 
             return worksheets[file_value][sheet_value]
 
@@ -2270,15 +2353,19 @@ class TSVToExcelConverter(QThread):
             worksheet = _get_or_create_sheet(file_value, sheet_value)
             current_row = row_counts[file_value][sheet_value]
             if current_row >= self.MAX_EXCEL_ROWS:
+                # Лист исчерпал лимит Excel — продолжаем в следующей части.
                 workbook = open_workbooks[file_value]
+                part_index = sheet_part_index[file_value][sheet_value] + 1
                 sheet_name = FileUtilities.sanitize_sheet_name(
-                    f"{sheet_value}_2", used_sheet_names[file_value]
+                    self.sheet_part_name(sheet_value, part_index),
+                    used_sheet_names[file_value],
                 )
                 worksheet = workbook.add_worksheet(sheet_name)
                 for col, header in enumerate(output_headers):
                     worksheet.write(0, col, header, workbook._tsv_header_format)
                 worksheets[file_value][sheet_value] = worksheet
                 row_counts[file_value][sheet_value] = 1
+                sheet_part_index[file_value][sheet_value] = part_index
                 current_row = 1
 
             workbook = open_workbooks[file_value]
@@ -2323,6 +2410,12 @@ class TSVToExcelConverter(QThread):
                         f"   {sheet_index}. Лист: {sheet_value}: {count:,} строк",
                         QColor("gray"),
                     )
+                self._log_sheet_parts(
+                    [
+                        (sheet_value, sheet_part_index[file_value][sheet_value])
+                        for sheet_value in sheet_counts
+                    ],
+                )
 
         self._emit_progress_update(current_file, "Сохранение файлов...", force=True)
         t_close_start = time.time()
@@ -2362,6 +2455,9 @@ class TSVToExcelConverter(QThread):
         open_workbooks: Dict[Any, xlsxwriter.Workbook] = {}
         worksheets: Dict[Any, Dict[Any, Any]] = defaultdict(dict)
         row_counts: Dict[Any, Dict[Any, int]] = defaultdict(dict)
+        sheet_part_index: Dict[Any, Dict[Any, int]] = defaultdict(
+            lambda: defaultdict(lambda: 1)
+        )
         used_file_names: Set[str] = set()
         used_sheet_names: Dict[Any, Set[str]] = defaultdict(set)
         output_files: List[str] = []
@@ -2496,6 +2592,7 @@ class TSVToExcelConverter(QThread):
                     worksheet.write(0, col, header, workbook._tsv_header_format)
                 worksheets[file_key][sheet_key] = worksheet
                 row_counts[file_key][sheet_key] = 1
+                sheet_part_index[file_key][sheet_key] = 1
             return worksheets[file_key][sheet_key]
 
         def process_row(row):
@@ -2519,9 +2616,13 @@ class TSVToExcelConverter(QThread):
                     worksheet = _get_or_create_sheet(file_key, sheet_key)
                     current_row = row_counts[file_key][sheet_key]
                     if current_row >= self.MAX_EXCEL_ROWS:
+                        # Лист исчерпал лимит Excel — продолжаем в следующей части.
                         workbook = open_workbooks[file_key]
+                        part_index = sheet_part_index[file_key][sheet_key] + 1
                         sheet_name = FileUtilities.sanitize_sheet_name(
-                            f"{_sheet_base(file_key, sheet_key)}_2",
+                            self.sheet_part_name(
+                                _sheet_base(file_key, sheet_key), part_index
+                            ),
                             used_sheet_names[file_key],
                         )
                         worksheet = workbook.add_worksheet(sheet_name)
@@ -2529,6 +2630,7 @@ class TSVToExcelConverter(QThread):
                             worksheet.write(0, col, header, workbook._tsv_header_format)
                         worksheets[file_key][sheet_key] = worksheet
                         row_counts[file_key][sheet_key] = 1
+                        sheet_part_index[file_key][sheet_key] = part_index
                         current_row = 1
                     workbook = open_workbooks[file_key]
                     worksheet.write_row(
@@ -2580,6 +2682,13 @@ class TSVToExcelConverter(QThread):
 
         self._emit_progress_update(current_file, "Сохранение файлов...", force=True)
         t_close_start = time.time()
+        for file_key, sheet_map in list(sheet_part_index.items()):
+            self._log_sheet_parts(
+                [
+                    (_sheet_label(sheet_key), sheet_map[sheet_key])
+                    for sheet_key in sheet_map
+                ],
+            )
         for workbook in open_workbooks.values():
             try:
                 workbook.close()
@@ -2660,6 +2769,13 @@ class TSVToExcelConverter(QThread):
             "Запись данных...",
             self._resolve_advanced_indices(headers),
         )
+
+        if sheet_num > 2:
+            self.log_message.emit(
+                f"Данные превысили лимит Excel и разбиты на {sheet_num - 1} "
+                f"листов ({MAX_ROWS:,} строк на лист + заголовок)",
+                QColor("orange"),
+            )
 
     def stop(self):
         """Останавливает конвертацию."""

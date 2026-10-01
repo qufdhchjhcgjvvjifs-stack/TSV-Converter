@@ -461,6 +461,7 @@ class TSVConverterApp:
         advanced_filters=None,
         file_targets=None,
         sheet_targets=None,
+        output_format="xlsx",
     ):
         """Фоновая задача подсчета распределения строк по значениям разделения."""
         counts = defaultdict(lambda: defaultdict(int))
@@ -645,7 +646,21 @@ class TSVConverterApp:
             "total_rows": total_rows,
             "multi_file": bool(file_targets),
             "multi_sheet": bool(sheet_targets),
+            "output_format": output_format,
         }
+
+    @staticmethod
+    def _plural(count: int, one: str, few: str, many: str) -> str:
+        """Русская плюрализация числительного: 1 лист / 2 листа / 5 листов."""
+        remainder = abs(count) % 100
+        if 11 <= remainder <= 14:
+            return many
+        remainder %= 10
+        if remainder == 1:
+            return one
+        if 2 <= remainder <= 4:
+            return few
+        return many
 
     def _on_split_distribution_calculated(self, result):
         """Обработчик завершения подсчета распределения."""
@@ -663,6 +678,10 @@ class TSVConverterApp:
         multi_sheet = (
             result.get("multi_sheet", False) if isinstance(result, dict) else False
         )
+        output_format = (
+            result.get("output_format", "xlsx") if isinstance(result, dict) else "xlsx"
+        )
+        is_csv = str(output_format).lower() == "csv"
         has_file_split = bool(
             multi_file or (file_column and file_column != "Не разделять на файлы")
         )
@@ -676,6 +695,9 @@ class TSVConverterApp:
             )
             return
 
+        # CSV не умеет листов: движок материализует измерение «листы» в отдельные файлы.
+        sheet_split_reported_as_files = is_csv and has_sheet_split and not has_file_split
+
         self._log_message("=== Прогноз разделения ===", QColor("cyan"))
         if multi_file:
             self._log_message(
@@ -688,7 +710,34 @@ class TSVConverterApp:
                 "Листы: multi-раскладка из Excel + Все остальное", QColor("blue")
             )
         elif has_sheet_split:
-            self._log_message(f"Листы по столбцу: {sheet_column}", QColor("blue"))
+            if sheet_split_reported_as_files:
+                self._log_message(
+                    f"Листы по столбцу: {sheet_column} (для CSV будут отдельные файлы)",
+                    QColor("blue"),
+                )
+            else:
+                self._log_message(
+                    f"Листы по столбцу: {sheet_column}", QColor("blue")
+                )
+
+        total_physical_sheets = 0
+        row_word = "Файл" if sheet_split_reported_as_files else "Лист"
+
+        def _sheet_label(sheet_value: str) -> str:
+            """Понятная подпись листа, если значение не задано."""
+            return sheet_value if sheet_value else "все строки файла"
+
+        def _parts(row_count: int) -> list:
+            """Физические листы Excel для логической группы строк."""
+            nonlocal total_physical_sheets
+            if row_count <= 0:
+                return []
+            if is_csv:
+                parts = [row_count]
+            else:
+                parts = TSVToExcelConverter.plan_sheet_parts(row_count)
+            total_physical_sheets += len(parts)
+            return parts
 
         if has_file_split and has_sheet_split:
             sorted_files = sorted(
@@ -698,51 +747,99 @@ class TSVConverterApp:
                 sorted_files, start=1
             ):
                 file_total = sum(sheet_counts.values())
-                self._log_message(
-                    f"{file_idx}. Файл: {file_value}: {file_total:,} строк",
-                    QColor("gray"),
-                )
                 sorted_sheets = sorted(
                     sheet_counts.items(), key=lambda item: item[1], reverse=True
                 )
-                for sheet_idx, (sheet_value, count) in enumerate(
-                    sorted_sheets, start=1
-                ):
-                    self._log_message(
-                        f"   {sheet_idx}. Лист: {sheet_value}: {count:,} строк",
-                        QColor("gray"),
-                    )
+                file_parts = sum(
+                    len(TSVToExcelConverter.plan_sheet_parts(count))
+                    for _sv, count in sorted_sheets
+                    if count > 0
+                )
+                self._log_message(
+                    f"{file_idx}. Файл: {file_value}: {file_total:,} строк"
+                    + (
+                        f" ({file_parts} {self._plural(file_parts, 'лист', 'листа', 'листов')} Excel)"
+                        if file_parts > 1
+                        else ""
+                    ),
+                    QColor("gray"),
+                )
+                sheet_num = 0
+                for sheet_value, count in sorted_sheets:
+                    parts = _parts(count)
+                    label = _sheet_label(sheet_value)
+                    for part_idx, part_count in enumerate(parts, start=1):
+                        sheet_num += 1
+                        suffix = (
+                            f" (часть {part_idx} из {len(parts)})" if len(parts) > 1 else ""
+                        )
+                        self._log_message(
+                            f"   {sheet_num}. {row_word}: {label}{suffix}: {part_count:,} строк",
+                            QColor("gray"),
+                        )
         elif has_file_split:
             sorted_files = sorted(
                 counts.items(), key=lambda item: sum(item[1].values()), reverse=True
             )
             for idx, (file_value, sheet_counts) in enumerate(sorted_files, start=1):
-                self._log_message(
-                    f"{idx}. Файл: {file_value}: {sum(sheet_counts.values()):,} строк",
-                    QColor("gray"),
-                )
+                file_total = sum(sheet_counts.values())
+                parts = _parts(file_total)
+                for part_idx, part_count in enumerate(parts, start=1):
+                    suffix = (
+                        f" (часть {part_idx} из {len(parts)})" if len(parts) > 1 else ""
+                    )
+                    self._log_message(
+                        f"{idx}. Файл: {file_value}{suffix}: {part_count:,} строк",
+                        QColor("gray"),
+                    )
         else:
             sheet_counts = counts.get("", {})
-            for idx, (sheet_value, count) in enumerate(
-                sorted(sheet_counts.items(), key=lambda item: item[1], reverse=True),
-                start=1,
+            sheet_num = 0
+            for sheet_value, count in sorted(
+                sheet_counts.items(), key=lambda item: item[1], reverse=True
             ):
-                self._log_message(
-                    f"{idx}. Лист: {sheet_value}: {count:,} строк",
-                    QColor("gray"),
-                )
+                parts = _parts(count)
+                label = _sheet_label(sheet_value)
+                for part_idx, part_count in enumerate(parts, start=1):
+                    sheet_num += 1
+                    suffix = (
+                        f" (часть {part_idx} из {len(parts)})" if len(parts) > 1 else ""
+                    )
+                    self._log_message(
+                        f"{sheet_num}. {row_word}: {label}{suffix}: {part_count:,} строк",
+                        QColor("gray"),
+                    )
 
-        item_type = "файлов" if has_file_split else "листов"
-        item_count = len(counts) if has_file_split else len(counts.get("", {}))
-        self._log_message("-" * 40, QColor("cyan"))
-        self._log_message(
-            f"Итого будет создано {item_type}: {item_count}", QColor("blue")
-        )
-        if has_file_split and has_sheet_split:
-            total_sheets = sum(len(sheet_counts) for sheet_counts in counts.values())
+        if is_csv:
             self._log_message(
-                f"Итого листов внутри файлов: {total_sheets}", QColor("blue")
+                "Формат CSV: листы не поддерживаются, ограничение 1 048 576 строк "
+                "не применяется.",
+                QColor("gray"),
             )
+            total_physical_sheets = 0
+
+        self._log_message("-" * 40, QColor("cyan"))
+        if has_file_split:
+            file_count = len(counts)
+            self._log_message(
+                f"Итого будет создано файлов: {file_count}", QColor("blue")
+            )
+            if not is_csv and total_physical_sheets:
+                self._log_message(
+                    f"Итого листов внутри файлов: {total_physical_sheets}",
+                    QColor("blue"),
+                )
+        else:
+            if sheet_split_reported_as_files:
+                file_count = len(counts.get("", {}))
+                self._log_message(
+                    f"Итого будет создано файлов: {file_count}", QColor("blue")
+                )
+            else:
+                self._log_message(
+                    f"Итого будет создано листов: {total_physical_sheets}",
+                    QColor("blue"),
+                )
         self._log_message(
             f"Всего строк к распределению: {total_rows:,}", QColor("blue")
         )
@@ -839,6 +936,7 @@ class TSVConverterApp:
                     self._get_combined_advanced_filters(),
                     self._get_file_split_targets(),
                     self._get_sheet_split_targets(),
+                    self.window.format_combo.currentText(),
                 )
 
                 worker.finished.connect(self._on_split_distribution_calculated)
