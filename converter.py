@@ -1498,24 +1498,42 @@ class TSVToExcelConverter(QThread):
                 with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
                     writer = csv.writer(f, delimiter=";")
 
-                    # Заголовки
                     row_headers = self.pivot_settings.get("rows", [])
-                    writer.writerow(row_headers + ["Колонка", "Метрика", "Значение"])
+                    header_cols = len(row_headers)
+                    row_values = sorted(pivot_data.keys())
+                    col_values = sorted(
+                        set(col for row in pivot_data.values() for col in row.keys())
+                    )
+                    value_settings = self.pivot_settings.get("values", [])
 
-                    for row_key, col_dict in pivot_data.items():
-                        row_prefix = (
-                            list(row_key) if isinstance(row_key, tuple) else [row_key]
-                        )
-                        for col_key, val_dict in col_dict.items():
-                            col_prefix = (
-                                list(col_key)
-                                if isinstance(col_key, tuple)
-                                else [col_key]
+                    col_headers = []
+                    for col_value in col_values:
+                        for val_setting in value_settings:
+                            col_headers.append(
+                                f"{' / '.join(str(v) for v in col_value)} - {val_setting['field']} ({val_setting['aggregation']})"
                             )
-                            col_str = " / ".join(map(str, col_prefix))
+                    writer.writerow(list(row_headers) + col_headers)
 
-                            for metric, value in val_dict.items():
-                                writer.writerow(row_prefix + [col_str, metric, value])
+                    for row_value in row_values:
+                        if header_cols > 0:
+                            row_prefix = (
+                                [str(v) for v in row_value]
+                                if isinstance(row_value, tuple)
+                                else [str(row_value)]
+                            )
+                        else:
+                            row_prefix = []
+
+                        row_cells = []
+                        for col_value in col_values:
+                            for val_setting in value_settings:
+                                key = f"{val_setting['field']}_{val_setting['aggregation']}"
+                                value = pivot_data[row_value].get(col_value, {}).get(key, 0)
+                                if isinstance(value, float):
+                                    row_cells.append(round(value, 2))
+                                else:
+                                    row_cells.append(value)
+                        writer.writerow(row_prefix + row_cells)
 
                 self.log_message.emit(
                     "Сводная таблица сохранена в отдельный CSV", QColor("green")
@@ -2852,9 +2870,15 @@ class PivotTableProcessor:
                     except ValueError:
                         filter_idx = None
 
-                # Multi-ограничения (И-логика)
+                # Multi-ограничения (И-логика) + фильтры сводной таблицы
                 adv_indices: List[tuple[int, Set[str]]] = []
                 for column, values in (advanced_filters or {}).items():
+                    if values:
+                        try:
+                            adv_indices.append((headers.index(column), set(values)))
+                        except ValueError:
+                            continue
+                for column, values in (settings.get("filter_values_map") or {}).items():
                     if values:
                         try:
                             adv_indices.append((headers.index(column), set(values)))
@@ -3056,9 +3080,12 @@ class PivotTableProcessor:
             }
         )
 
+        row_headers = settings.get("rows", [])
+        header_cols = len(row_headers)
+
         # Заголовки строк
         current_col = 0
-        for row_header in settings.get("rows", []):
+        for row_header in row_headers:
             worksheet.write(0, current_col, row_header, header_format)
             current_col += 1
 
@@ -3074,19 +3101,20 @@ class PivotTableProcessor:
             current_col = 0
 
             # Значения строк (выравнивание влево, без заливки)
-            if isinstance(row_value, tuple):
-                for value in row_value:
-                    worksheet.write(row_idx, current_col, str(value), row_label_format)
-                    current_col += 1
-            else:
-                worksheet.write(row_idx, 0, str(row_value), row_label_format)
-                current_col = 1
+            if header_cols > 0:
+                if isinstance(row_value, tuple):
+                    for value in row_value:
+                        worksheet.write(row_idx, current_col, str(value), row_label_format)
+                        current_col += 1
+                else:
+                    worksheet.write(row_idx, 0, str(row_value), row_label_format)
+                    current_col = 1
 
             # Агрегированные значения (выравнивание вправо, без заливки)
             for col_value in col_values:
                 for val_setting in value_settings:
                     key = f"{val_setting['field']}_{val_setting['aggregation']}"
-                    value = pivot_data[row_value][col_value].get(key, 0)
+                    value = pivot_data[row_value].get(col_value, {}).get(key, 0)
 
                     if isinstance(value, float):
                         worksheet.write(

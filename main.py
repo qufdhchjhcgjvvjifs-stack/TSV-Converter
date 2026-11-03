@@ -1245,6 +1245,8 @@ class TSVConverterApp:
                 headers = active_headers
 
             dialog = PivotSettingsDialog(headers, self.window)
+            if self.window._pivot_settings:
+                dialog.load_settings(self.window._pivot_settings)
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 self.window._pivot_settings = dialog.get_settings()
                 # Добавляем текущие значения фильтра

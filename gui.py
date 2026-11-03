@@ -69,7 +69,7 @@ from typing import Optional, Dict, List, Set, Any
 # Импортируем утилиты из converter.py
 from converter import FileUtilities, ConversionConfig
 
-APP_VERSION = "20.6"
+APP_VERSION = "21"
 
 
 # ============================================================================
@@ -1786,6 +1786,7 @@ class PivotSettingsDialog(QDialog):
             self._is_dark = parent._is_dark_theme
 
         self._columns = columns
+        self._filter_values_map: Dict[str, List[str]] = {}
         self._init_ui()
         apply_theme_to_dialog(self, self._is_dark)
 
@@ -1879,12 +1880,16 @@ class PivotSettingsDialog(QDialog):
 
         list_widget = QListWidget()
         list_widget.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
-        list_widget.addItems(items)
+        for col in items:
+            item = QListWidgetItem(col)
+            item.setData(Qt.ItemDataRole.UserRole, col)
+            list_widget.addItem(item)
         layout.addWidget(list_widget)
 
         # Сохраняем ссылку на list_widget для внешнего доступа
         if title == "Фильтры":
             self.filter_list_group = list_widget
+            list_widget.itemClicked.connect(self._on_filter_item_clicked)
         elif title == "Строки":
             self.row_list_group = list_widget
         elif title == "Столбцы":
@@ -1892,7 +1897,100 @@ class PivotSettingsDialog(QDialog):
 
         return group
 
-    def _add_value(self):
+    @staticmethod
+    def _get_item_column_name(item: QListWidgetItem) -> str:
+        col = item.data(Qt.ItemDataRole.UserRole)
+        return col if col is not None else item.text()
+
+    def _resolve_main_window(self) -> Optional[QMainWindow]:
+        parent = self.parent()
+        if isinstance(parent, QMainWindow):
+            return parent
+        from PySide6.QtWidgets import QApplication
+
+        for widget in QApplication.topLevelWidgets():
+            if isinstance(widget, QMainWindow):
+                return widget
+        return None
+
+    def _on_filter_item_clicked(self, item: QListWidgetItem):
+        """Открывает выбор значений при выборе поля в списке «Фильтры»."""
+        column = self._get_item_column_name(item)
+        if not item.isSelected():
+            self._filter_values_map.pop(column, None)
+            item.setText(column)
+            return
+
+        main_window = self._resolve_main_window()
+        if (
+            not main_window
+            or not hasattr(main_window, "file_list")
+            or main_window.file_list.count() == 0
+        ):
+            self.filter_list_group.blockSignals(True)
+            item.setSelected(False)
+            self.filter_list_group.blockSignals(False)
+            return
+
+        file_paths = [
+            main_window.file_list.item(i).text()
+            for i in range(main_window.file_list.count())
+        ]
+        filter_col = (
+            main_window.filter_column_combo.currentText()
+            if hasattr(main_window, "filter_column_combo")
+            else "Не фильтровать"
+        )
+        filter_vals = (
+            list(main_window._filter_values.get(filter_col, []))
+            if filter_col != "Не фильтровать" and hasattr(main_window, "_filter_values")
+            else []
+        )
+
+        extra_filters: Dict[str, List[str]] = {}
+        if hasattr(main_window, "get_combined_advanced_filters"):
+            try:
+                extra_filters.update(main_window.get_combined_advanced_filters())
+            except Exception:
+                pass
+        for other_col, other_vals in self._filter_values_map.items():
+            if other_col != column and other_vals:
+                if other_col in extra_filters and extra_filters[other_col]:
+                    extra_filters[other_col] = [
+                        v for v in extra_filters[other_col] if v in set(other_vals)
+                    ]
+                else:
+                    extra_filters[other_col] = list(other_vals)
+
+        dialog = ColumnValuesDialog(
+            parent=self,
+            file_paths=file_paths,
+            column=column,
+            filter_column=filter_col,
+            filter_values=filter_vals,
+            selected_values=list(self._filter_values_map.get(column, [])),
+            extra_filters=extra_filters,
+        )
+        dialog.setWindowTitle(f"Фильтр сводной таблицы: {column}")
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            selected = dialog.get_selected_values()
+            if selected:
+                self._filter_values_map[column] = selected
+                item.setText(f"{column} ({len(selected)})")
+            else:
+                self._filter_values_map.pop(column, None)
+                item.setText(column)
+                self.filter_list_group.blockSignals(True)
+                item.setSelected(False)
+                self.filter_list_group.blockSignals(False)
+        else:
+            if column not in self._filter_values_map or not self._filter_values_map[column]:
+                item.setText(column)
+                self.filter_list_group.blockSignals(True)
+                item.setSelected(False)
+                self.filter_list_group.blockSignals(False)
+
+    def _add_value(self, field: Optional[str] = None, aggregation: Optional[str] = None):
         """Добавляет строку в таблицу значений."""
         row = self.values_table.rowCount()
         self.values_table.insertRow(row)
@@ -1900,13 +1998,15 @@ class PivotSettingsDialog(QDialog):
         # Значение
         value_combo = QComboBox()
         value_combo.addItems(self._columns)
-        value_combo.setCurrentText(self.value_combo.currentText())
+        value_combo.setCurrentText(field if field else self.value_combo.currentText())
         self.values_table.setCellWidget(row, 0, value_combo)
 
         # Агрегация
         agg_combo = QComboBox()
         agg_combo.addItems(["Сумма", "Среднее", "Количество", "Максимум", "Минимум"])
-        agg_combo.setCurrentText(self.agg_combo.currentText())
+        agg_combo.setCurrentText(
+            aggregation if aggregation else self.agg_combo.currentText()
+        )
         self.values_table.setCellWidget(row, 1, agg_combo)
 
         # Кнопка удаления
@@ -1917,6 +2017,50 @@ class PivotSettingsDialog(QDialog):
             )
         )
         self.values_table.setCellWidget(row, 2, delete_btn)
+
+    def load_settings(self, settings: Dict[str, Any]):
+        """Восстанавливает ранее сохранённые настройки сводной таблицы."""
+        if not settings:
+            return
+
+        self.remove_duplicates_checkbox.setChecked(
+            bool(settings.get("remove_duplicates", False))
+        )
+
+        saved_filter_map = dict(settings.get("filter_values_map") or {})
+        saved_filters = set(settings.get("filters") or [])
+        self._filter_values_map = {}
+
+        self.filter_list_group.blockSignals(True)
+        for i in range(self.filter_list_group.count()):
+            item = self.filter_list_group.item(i)
+            col = self._get_item_column_name(item)
+            vals = list(saved_filter_map.get(col) or [])
+            if col in saved_filters and vals:
+                self._filter_values_map[col] = vals
+                item.setText(f"{col} ({len(vals)})")
+                item.setSelected(True)
+            else:
+                item.setText(col)
+                item.setSelected(False)
+        self.filter_list_group.blockSignals(False)
+
+        saved_rows = set(settings.get("rows") or [])
+        for i in range(self.row_list_group.count()):
+            item = self.row_list_group.item(i)
+            item.setSelected(self._get_item_column_name(item) in saved_rows)
+
+        saved_cols = set(settings.get("columns") or [])
+        for i in range(self.col_list_group.count()):
+            item = self.col_list_group.item(i)
+            item.setSelected(self._get_item_column_name(item) in saved_cols)
+
+        self.values_table.setRowCount(0)
+        for val_setting in settings.get("values") or []:
+            field = val_setting.get("field")
+            agg = val_setting.get("aggregation")
+            if field in self._columns and agg:
+                self._add_value(field=field, aggregation=agg)
 
     def _validate_and_accept(self):
         """Проверяет и принимает настройки."""
@@ -1950,8 +2094,6 @@ class PivotSettingsDialog(QDialog):
 
     def _show_preview(self):
         """Показывает предпросмотр сводной таблицы."""
-        from PySide6.QtWidgets import QApplication
-
         settings = self.get_settings()
 
         if not (settings["rows"] or settings["columns"]):
@@ -1979,11 +2121,7 @@ class PivotSettingsDialog(QDialog):
             return
 
         # Находим главное окно
-        main_window = None
-        for widget in QApplication.topLevelWidgets():
-            if isinstance(widget, QMainWindow):
-                main_window = widget
-                break
+        main_window = self._resolve_main_window()
 
         if not main_window:
             msgbox = QMessageBox(
@@ -2027,8 +2165,6 @@ class PivotSettingsDialog(QDialog):
             filter_col_text if filter_col_text != "Не фильтровать" else ""
         )
 
-        # Отладка
-
         # Показываем диалог предпросмотра
         preview_dialog = PivotPreviewDialog(main_window, settings)
         preview_dialog.exec()
@@ -2047,10 +2183,27 @@ class PivotSettingsDialog(QDialog):
                     }
                 )
 
+        selected_filters = [
+            self._get_item_column_name(item)
+            for item in self.filter_list_group.selectedItems()
+        ]
+        filter_values_map = {
+            col: list(self._filter_values_map[col])
+            for col in selected_filters
+            if col in self._filter_values_map and self._filter_values_map[col]
+        }
+
         return {
-            "filters": [item.text() for item in self.filter_list_group.selectedItems()],
-            "rows": [item.text() for item in self.row_list_group.selectedItems()],
-            "columns": [item.text() for item in self.col_list_group.selectedItems()],
+            "filters": list(filter_values_map.keys()),
+            "filter_values_map": filter_values_map,
+            "rows": [
+                self._get_item_column_name(item)
+                for item in self.row_list_group.selectedItems()
+            ],
+            "columns": [
+                self._get_item_column_name(item)
+                for item in self.col_list_group.selectedItems()
+            ],
             "values": values_settings,
             "remove_duplicates": self.remove_duplicates_checkbox.isChecked(),
         }
@@ -2311,21 +2464,24 @@ class PivotPreviewDialog(QDialog):
             current_col = 0
 
             # Значения строк
-            if isinstance(row_value, tuple):
-                for col_idx, value in enumerate(row_value):
+            if header_cols > 0:
+                if isinstance(row_value, tuple):
+                    for col_idx, value in enumerate(row_value):
+                        self.table_widget.setItem(
+                            row_idx, col_idx, QTableWidgetItem(str(value))
+                        )
+                    current_col = len(row_value)
+                else:
                     self.table_widget.setItem(
-                        row_idx, col_idx, QTableWidgetItem(str(value))
+                        row_idx, 0, QTableWidgetItem(str(row_value))
                     )
-                current_col = len(row_value)
-            else:
-                self.table_widget.setItem(row_idx, 0, QTableWidgetItem(str(row_value)))
-                current_col = 1
+                    current_col = 1
 
             # Агрегированные значения
             for col_value in col_values:
                 for val_setting in value_settings:
                     key = f"{val_setting['field']}_{val_setting['aggregation']}"
-                    value = self._pivot_data[row_value][col_value].get(key, 0)
+                    value = self._pivot_data[row_value].get(col_value, {}).get(key, 0)
 
                     if isinstance(value, float):
                         item = QTableWidgetItem(f"{value:.2f}")
@@ -2376,10 +2532,22 @@ class PivotPreviewDialog(QDialog):
             msgbox.exec()
             return
 
+        timestamp = datetime.now().strftime("%d.%m.%Y_%H.%M.%S")
+        default_filename = f"Сводная таблица {timestamp}.xlsx"
+        main_window = self.parent()
+        default_dir = ""
+        if main_window and hasattr(main_window, "output_path_edit"):
+            default_dir = main_window.output_path_edit.text().strip()
+        default_save_path = (
+            os.path.join(default_dir, default_filename)
+            if default_dir and os.path.isdir(default_dir)
+            else default_filename
+        )
+
         save_path, _ = QFileDialog.getSaveFileName(
             self,
             "Сохранить сводную таблицу",
-            "",
+            default_save_path,
             "Excel файлы (*.xlsx);;Все файлы (*.*)",
         )
 
@@ -2430,19 +2598,22 @@ class PivotPreviewDialog(QDialog):
                     current_col = 0
 
                     # Значения строк
-                    if isinstance(row_value, tuple):
-                        for col_idx, value in enumerate(row_value):
-                            worksheet.write(row_idx, col_idx, str(value), cell_format)
-                        current_col = len(row_value)
-                    else:
-                        worksheet.write(row_idx, 0, str(row_value), cell_format)
-                        current_col = 1
+                    if header_cols > 0:
+                        if isinstance(row_value, tuple):
+                            for col_idx, value in enumerate(row_value):
+                                worksheet.write(
+                                    row_idx, col_idx, str(value), cell_format
+                                )
+                            current_col = len(row_value)
+                        else:
+                            worksheet.write(row_idx, 0, str(row_value), cell_format)
+                            current_col = 1
 
                     # Агрегированные значения
                     for col_value in col_values:
                         for val_setting in value_settings:
                             key = f"{val_setting['field']}_{val_setting['aggregation']}"
-                            value = self._pivot_data[row_value][col_value].get(key, 0)
+                            value = self._pivot_data[row_value].get(col_value, {}).get(key, 0)
 
                             if isinstance(value, float):
                                 worksheet.write(
