@@ -69,7 +69,7 @@ from typing import Optional, Dict, List, Set, Any
 # Импортируем утилиты из converter.py
 from converter import FileUtilities, ConversionConfig
 
-APP_VERSION = "20.5"
+APP_VERSION = "20.6"
 
 
 # ============================================================================
@@ -3051,7 +3051,7 @@ class MainWindow(QMainWindow):
 
         # Спойлер журнала событий
         self.toggle_log_btn = QToolButton()
-        self.toggle_log_btn.setText("▶ Показать журнал событий")
+        self.toggle_log_btn.setText("Показать журнал событий")
         self.toggle_log_btn.setCheckable(True)
         self.toggle_log_btn.setChecked(False)
         self.toggle_log_btn.setToolButtonStyle(
@@ -3098,10 +3098,10 @@ class MainWindow(QMainWindow):
         self.log_group.setVisible(checked)
         self._spacer.setVisible(not checked)
         if checked:
-            self.toggle_log_btn.setText("▼ Скрыть журнал событий")
+            self.toggle_log_btn.setText("Скрыть журнал событий")
             self.toggle_log_btn.setArrowType(Qt.ArrowType.DownArrow)
         else:
-            self.toggle_log_btn.setText("▶ Показать журнал событий")
+            self.toggle_log_btn.setText("Показать журнал событий")
             self.toggle_log_btn.setArrowType(Qt.ArrowType.RightArrow)
 
         # Пересчитываем размер окна (с задержкой, чтобы layout успел обновиться)
