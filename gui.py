@@ -69,7 +69,7 @@ from typing import Optional, Dict, List, Set, Any
 # Импортируем утилиты из converter.py
 from converter import FileUtilities, ConversionConfig
 
-APP_VERSION = "21"
+APP_VERSION = "21.1"
 
 
 # ============================================================================
@@ -3362,9 +3362,6 @@ class MainWindow(QMainWindow):
         self.file_split_options_btn.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
         )
-        self.file_split_options_btn.setToolTip(
-            "Раскладка по файлам из Excel: каждая пара столбец=значение → свой файл + Все остальное"
-        )
         self.file_split_options_btn.clicked.connect(
             lambda: self._choose_advanced_constraints("files")
         )
@@ -3389,9 +3386,6 @@ class MainWindow(QMainWindow):
         )
         self.sheet_split_options_btn.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
-        )
-        self.sheet_split_options_btn.setToolTip(
-            "Раскладка по листам из Excel: каждая пара столбец=значение → свой лист + Все остальное"
         )
         self.sheet_split_options_btn.clicked.connect(
             lambda: self._choose_advanced_constraints("sheets")
@@ -3419,14 +3413,12 @@ class MainWindow(QMainWindow):
         self.filter_options_btn.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
         )
-        self.filter_options_btn.setToolTip(
-            "Multi-ограничения из Excel для фильтра (И-логика)"
-        )
         self.filter_options_btn.clicked.connect(
             lambda: self._choose_advanced_constraints("filter")
         )
         filter_layout.addWidget(self.filter_options_btn)
         layout.addWidget(filter_box, 2, 1)
+        self._update_options_buttons()
 
         layout.addWidget(QLabel("Столбцы вывода:"), 2, 2)
         self.columns_btn = SecondaryButton("Настроить...")
@@ -4071,6 +4063,39 @@ class MainWindow(QMainWindow):
         parts = [f"{col}: {len(vals)} зн." for col, vals in sorted(mapping.items())]
         return "; ".join(parts)
 
+    def _build_excel_template_tooltip(self, dimension: str) -> str:
+        """Формирует HTML-подсказку по формату загружаемого Excel-файла."""
+        headers = {
+            "files": "Раскладка по файлам из Excel (каждая пара столбец=значение → свой файл + Все остальное)",
+            "sheets": "Раскладка по листам из Excel (каждая пара столбец=значение → свой лист + Все остальное)",
+            "filter": "Multi-ограничения из Excel для фильтра (И-логика)",
+        }
+        title = headers.get(dimension, headers["filter"])
+        return (
+            f"<div style='max-width: 560px;'>"
+            f"<p style='margin: 0 0 6px 0;'><b>{title}</b></p>"
+            f"<p style='margin: 6px 0 4px 0;'><b>1. Как выглядит файл</b></p>"
+            f"<table border='1' cellspacing='0' cellpadding='4' style='border-collapse: collapse; margin-bottom: 6px;'>"
+            f"<tr><th></th><th align='left'><b>A</b></th><th align='left'><b>B</b></th></tr>"
+            f"<tr><td><b>1</b></td><td>ID проекта</td><td>02849b3c-f930-4b10-b132-248adeb7c1cb</td></tr>"
+            f"<tr><td><b>2</b></td><td>Код ТТ</td><td>011581</td></tr>"
+            f"<tr><td><b>3</b></td><td>Код ТТ</td><td>011761</td></tr>"
+            f"<tr><td><b>4</b></td><td>Название ДМП</td><td>Стойка Бразилия</td></tr>"
+            f"</table>"
+            f"<p style='margin: 6px 0;'>"
+            f"• <b>Столбец A</b> — название столбца из вашего TSV/CSV. Оно должно совпадать с заголовком <b>символ в символ</b>, включая регистр.<br>"
+            f"• <b>Столбец B</b> — одно значение этого столбца.<br>"
+            f"• <b>Одна строка Excel — одна пара «столбец = значение».</b> Чтобы задать несколько значений для одного столбца, повторите название столбца в нескольких строках.<br>"
+            f"• Программа читает только <b>первый лист</b> книги, только столбцы <b>A и B</b>. Остальные листы и столбцы игнорируются."
+            f"</p>"
+            f"<p style='margin: 6px 0 0 0;'>"
+            f"По итогу указанного примера из файла TSV будут выбраны строки соответствующие проекту "
+            f'&quot;02849b3c-f930-4b10-b132-248adeb7c1cb&quot; для ТТ &quot;011581&quot; и &quot;011761&quot; '
+            f"оборудования &quot;Стойка Бразилия&quot;"
+            f"</p>"
+            f"</div>"
+        )
+
     def _update_options_buttons(self):
         """Обновляет подсказки и маркер активности кнопок ...."""
         for dimension, attr in (
@@ -4085,16 +4110,13 @@ class MainWindow(QMainWindow):
             if mapping:
                 btn.setText("...•")
                 btn.setToolTip(
-                    f"Активно: {self._summarize_adv_map(mapping)} (нажмите для замены/очистки)"
+                    f"<p style='margin: 0 0 6px 0;'><b>Активно:</b> {self._summarize_adv_map(mapping)} "
+                    f"<i>(нажмите для замены/очистки)</i></p>"
+                    + self._build_excel_template_tooltip(dimension)
                 )
             else:
                 btn.setText("...")
-                hints = {
-                    "files": "Раскладка по файлам из Excel: каждая пара столбец=значение → свой файл + Все остальное",
-                    "sheets": "Раскладка по листам из Excel: каждая пара столбец=значение → свой лист + Все остальное",
-                    "filter": "Multi-ограничения из Excel для фильтра (И-логика)",
-                }
-                btn.setToolTip(hints[dimension])
+                btn.setToolTip(self._build_excel_template_tooltip(dimension))
 
     def _prune_advanced_maps(self, valid_columns: Set[str]):
         """Удаляет из multi-ограничений столбцы, которых больше нет в данных."""
